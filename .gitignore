@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.playwright-mcp/
+.ruff_cache/
+runs/
+*.pyc
+.DS_Store
+*.log
+/Camera,
+/operator-before-camera.png

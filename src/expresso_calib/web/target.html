@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Expresso Target" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Expresso Calib Target</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260502-pdf" />
+  </head>
+  <body class="target-body">
+    <main class="target-shell">
+      <section class="target-panel">
+        <h1>ChaRuCo Target</h1>
+        <p>Enter the iPad metadata if known, then show the board before presenting the target to the camera.</p>
+        <form id="targetForm" class="target-form">
+          <label>
+            iPad model
+            <select id="modelSelect"></select>
+          </label>
+          <label>
+            Physical width (mm)
+            <input id="widthMm" inputmode="decimal" placeholder="optional" />
+          </label>
+          <label>
+            Physical height (mm)
+            <input id="heightMm" inputmode="decimal" placeholder="optional" />
+          </label>
+          <div class="target-actions">
+            <button id="saveMeta" type="submit">Save Metadata</button>
+            <button id="fullscreen" type="button" class="primary">Show Board</button>
+            <a id="pdfLink" class="button-link" target="_blank" rel="noopener">Open PDF</a>
+          </div>
+        </form>
+        <p id="installHint" class="target-hint"></p>
+        <p id="targetStatus" class="log">Board manifest is shared with the detector.</p>
+      </section>
+
+      <section id="targetStage" class="target-stage" aria-label="ChaRuCo board">
+        <img id="boardImage" alt="ChaRuCo calibration board" />
+      </section>
+    </main>
+
+    <script src="/static/target.js?v=20260502-pdf"></script>
+  </body>
+</html>
