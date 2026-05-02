@@ -5,12 +5,16 @@ import json
 import socket
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 import cv2
+import numpy as np
 import qrcode
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -18,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 
 from .board import DEFAULT_BOARD, target_pdf_bytes, target_png_bytes
-from .calibration import CalibrationAccumulator
+from .calibration import CalibrationAccumulator, CalibrationSolveResult, CandidateFrame
 from .detection import CharucoDetector, Frame
 from .multi_camera import FocusTracker, clean_label, slugify_label
 
@@ -26,8 +30,14 @@ ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = Path(__file__).resolve().parent / "web"
 RUNS_DIR = ROOT / "runs"
 PORT = 3987
-PREVIEW_STREAM_FPS = 30
+PREVIEW_STREAM_FPS = 18
 DETECTION_FPS = 6
+CAPTURE_OPEN_TIMEOUT_SEC = 8.0
+CAPTURE_READ_TIMEOUT_SEC = 2.0
+CAPTURE_RECONNECT_DELAY_SEC = 3.0
+FRAME_STALE_SEC = 3.0
+MJPEG_READ_CHUNK_BYTES = 4096
+MJPEG_MAX_BUFFER_BYTES = 8 * 1024 * 1024
 DEFAULT_CAMERA_URL = "http://127.0.0.1:3988/stream.mjpg"
 
 
@@ -58,6 +68,170 @@ class MetricsHub:
             self.disconnect(client)
 
 
+@dataclass(frozen=True)
+class DetectionJob:
+    generation: int
+    frame_index: int
+    timestamp_sec: float
+    image_bgr: Any
+
+
+@dataclass(frozen=True)
+class ScreenshotJob:
+    generation: int
+    candidate: CandidateFrame
+
+
+@dataclass(frozen=True)
+class SolveJob:
+    generation: int
+    candidates: list[CandidateFrame]
+    consumed_new_frames: int
+
+
+def _put_latest(queue: asyncio.Queue[Any], item: Any) -> int:
+    dropped = 0
+    while True:
+        try:
+            queue.put_nowait(item)
+            return dropped
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+                queue.task_done()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                continue
+
+
+def _clear_queue(queue: asyncio.Queue[Any]) -> None:
+    while True:
+        try:
+            queue.get_nowait()
+            queue.task_done()
+        except asyncio.QueueEmpty:
+            return
+
+
+def _task_running(task: asyncio.Task[Any] | None) -> bool:
+    return task is not None and not task.done()
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+class MjpegCapture:
+    def __init__(self, url: str) -> None:
+        self.url = url
+        request = UrlRequest(
+            url,
+            headers={"User-Agent": "ExpressoCalib/0.1", "Connection": "close"},
+        )
+        self.response = urlopen(request, timeout=CAPTURE_OPEN_TIMEOUT_SEC)
+        self.buffer = bytearray()
+        self.opened = True
+        self.boundary = self._parse_boundary(
+            self.response.headers.get("Content-Type", "")
+        )
+
+    def isOpened(self) -> bool:
+        return self.opened
+
+    def read(self) -> tuple[bool, Any]:
+        if self.boundary is not None:
+            ok, image = self._read_multipart_frame()
+            if ok:
+                return ok, image
+            if not self.opened:
+                return False, None
+
+        return self._scan_jpeg_frame()
+
+    def _parse_boundary(self, content_type: str) -> bytes | None:
+        for part in content_type.split(";"):
+            name, separator, value = part.strip().partition("=")
+            if separator and name.lower() == "boundary":
+                clean = value.strip().strip('"')
+                if clean:
+                    if not clean.startswith("--"):
+                        clean = "--" + clean
+                    return clean.encode("ascii", "ignore")
+        return None
+
+    def _read_multipart_frame(self) -> tuple[bool, Any]:
+        while self.opened:
+            line = self.response.readline()
+            if not line:
+                self.opened = False
+                return False, None
+            if self.boundary not in line.strip():
+                continue
+
+            headers: dict[str, str] = {}
+            while True:
+                line = self.response.readline()
+                if not line:
+                    self.opened = False
+                    return False, None
+                if line in {b"\r\n", b"\n"}:
+                    break
+                key, separator, value = line.partition(b":")
+                if separator:
+                    headers[key.decode("latin1").strip().lower()] = (
+                        value.decode("latin1").strip()
+                    )
+
+            content_length = _safe_int(headers.get("content-length"))
+            if content_length is None or content_length <= 0:
+                self.boundary = None
+                return False, None
+
+            jpeg = self.response.read(content_length)
+            if len(jpeg) != content_length:
+                self.opened = False
+                return False, None
+            return self._decode_jpeg(jpeg)
+
+        return False, None
+
+    def _scan_jpeg_frame(self) -> tuple[bool, Any]:
+        while self.opened:
+            start = self.buffer.find(b"\xff\xd8")
+            end = self.buffer.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+            if start >= 0 and end >= 0:
+                jpeg = bytes(self.buffer[start : end + 2])
+                del self.buffer[: end + 2]
+                return self._decode_jpeg(jpeg)
+
+            read = getattr(self.response, "read1", self.response.read)
+            chunk = read(MJPEG_READ_CHUNK_BYTES)
+            if not chunk:
+                self.opened = False
+                return False, None
+            self.buffer.extend(chunk)
+            if len(self.buffer) > MJPEG_MAX_BUFFER_BYTES:
+                del self.buffer[: len(self.buffer) - MJPEG_READ_CHUNK_BYTES]
+        return False, None
+
+    def _decode_jpeg(self, jpeg: bytes) -> tuple[bool, Any]:
+        image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        return (image is not None), image
+
+    def release(self) -> None:
+        self.opened = False
+        try:
+            self.response.close()
+        except Exception:
+            pass
+
+    def set(self, *_args: Any) -> bool:
+        return False
+
+
 class ManagedCamera:
     def __init__(
         self,
@@ -71,136 +245,420 @@ class ManagedCamera:
         self.label = clean_label(label, fallback=camera_id)
         self.url = url
         self.detector = CharucoDetector(DEFAULT_BOARD)
-        self.accumulator = CalibrationAccumulator(
-            DEFAULT_BOARD,
-            manager.session_dir / "ephemeral" / camera_id,
-            auto_export=False,
-            create_run_dir=False,
-        )
-        self.accumulator.source_id = camera_id
-        self.accumulator.target_metadata = manager.target_metadata
+        self.accumulator = self._new_accumulator(manager.session_dir, manager.target_metadata)
 
         self.running = False
         self.task: asyncio.Task[None] | None = None
+        self.capture_task: asyncio.Task[None] | None = None
+        self.preview_task: asyncio.Task[None] | None = None
+        self.detection_task: asyncio.Task[None] | None = None
+        self.solver_task: asyncio.Task[None] | None = None
+        self.screenshot_task: asyncio.Task[None] | None = None
         self.last_error: str | None = None
         self.frames_seen = 0
         self.frame_index = 0
         self.started_at: float | None = None
         self.last_frame_at: float | None = None
         self.frame_times: deque[float] = deque()
+        self.latest_frame: Any | None = None
+        self.latest_frame_seq = 0
         self.latest_jpeg: bytes | None = None
         self.latest_jpeg_seq = 0
         self.latest_detection: Any = None
         self.latest_detection_wall_time: float | None = None
         self.detection_running = False
+        self.solver_running = False
+        self.screenshot_running = False
         self.last_detection_started_at = 0.0
+        self.last_detection_sample_at = 0.0
         self.last_screenshot_path: str | None = None
+        self.last_preview_encoded_at = 0.0
         self.last_broadcast_at = 0.0
+        self.generation = 0
+        self.dropped_detection_frames = 0
+        self.dropped_screenshot_jobs = 0
+        self.detection_queue: asyncio.Queue[DetectionJob] = asyncio.Queue(maxsize=1)
+        self.solve_queue: asyncio.Queue[SolveJob] = asyncio.Queue(maxsize=1)
+        self.screenshot_queue: asyncio.Queue[ScreenshotJob] = asyncio.Queue(maxsize=64)
+
+    def _new_accumulator(
+        self, session_dir: Path, target_metadata: dict[str, Any]
+    ) -> CalibrationAccumulator:
+        accumulator = CalibrationAccumulator(
+            DEFAULT_BOARD,
+            session_dir / "ephemeral" / self.id,
+            auto_export=False,
+            create_run_dir=False,
+        )
+        accumulator.source_id = self.id
+        accumulator.target_metadata = target_metadata
+        return accumulator
 
     async def start(self) -> None:
         if self.running:
             return
+        self.generation += 1
+        self._clear_pipeline_queues()
         self.running = True
         self.last_error = None
         self.started_at = time.time()
-        self.task = asyncio.create_task(self._run(), name=f"camera-source-{self.id}")
+        self.last_detection_sample_at = 0.0
+        self.last_detection_started_at = 0.0
+        self._clear_preview_state()
+        self.capture_task = asyncio.create_task(
+            self._capture_loop(), name=f"camera-capture-{self.id}"
+        )
+        self.preview_task = asyncio.create_task(
+            self._preview_loop(), name=f"camera-preview-{self.id}"
+        )
+        self.detection_task = asyncio.create_task(
+            self._detection_loop(), name=f"camera-detection-{self.id}"
+        )
+        self.solver_task = asyncio.create_task(
+            self._solver_loop(), name=f"camera-solver-{self.id}"
+        )
+        self.screenshot_task = asyncio.create_task(
+            self._screenshot_loop(), name=f"camera-screenshot-{self.id}"
+        )
+        self.task = self.capture_task
 
     async def stop(self) -> None:
+        self.generation += 1
         self.running = False
-        if self.task is not None:
-            self.task.cancel()
+        tasks = [
+            task
+            for task in (
+                self.capture_task,
+                self.preview_task,
+                self.detection_task,
+                self.solver_task,
+                self.screenshot_task,
+            )
+            if task is not None
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.task = None
+        self.capture_task = None
+        self.preview_task = None
+        self.detection_task = None
+        self.solver_task = None
+        self.screenshot_task = None
+        self.detection_running = False
+        self.solver_running = False
+        self.screenshot_running = False
+        self._clear_pipeline_queues()
+        self._clear_preview_state()
+
+    async def _capture_loop(self) -> None:
+        while self.running:
             try:
-                await self.task
-            except asyncio.CancelledError:
-                pass
-            self.task = None
-
-    async def _run(self) -> None:
-        capture = await asyncio.to_thread(cv2.VideoCapture, self.url)
-        if capture is None or not capture.isOpened():
-            self.last_error = f"Could not open camera URL: {self.url}"
-            self.running = False
-            await self.manager.broadcast()
-            return
-
-        try:
-            while self.running:
-                ok, frame = await asyncio.to_thread(capture.read)
-                if not ok or frame is None:
-                    self.last_error = "Camera URL did not return a frame."
-                    await self._maybe_broadcast()
-                    await asyncio.sleep(0.15)
-                    continue
-
-                self.last_error = None
-                self.frames_seen += 1
-                now = time.time()
-                self.last_frame_at = now
-                self.frame_times.append(now)
-                while self.frame_times and now - self.frame_times[0] > 2.0:
-                    self.frame_times.popleft()
-
-                encode_ok, encoded = cv2.imencode(
-                    ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 78]
+                capture = await asyncio.wait_for(
+                    asyncio.to_thread(self._open_capture),
+                    timeout=CAPTURE_OPEN_TIMEOUT_SEC,
                 )
-                if encode_ok:
-                    self.latest_jpeg = encoded.tobytes()
-                    self.latest_jpeg_seq += 1
-
-                if self._should_detect(now):
-                    self.detection_running = True
-                    self.last_detection_started_at = now
-                    self.frame_index += 1
-                    timestamp = time.monotonic() - self.manager.started_at
-                    asyncio.create_task(
-                        self._process_detection(frame.copy(), self.frame_index, timestamp),
-                        name=f"charuco-detection-{self.id}",
-                    )
-
+            except asyncio.TimeoutError:
+                self._mark_capture_unavailable("Camera open timed out; reconnecting.")
+                await self.manager.broadcast()
+                await asyncio.sleep(CAPTURE_RECONNECT_DELAY_SEC)
+                continue
+            except Exception as exc:
+                self._mark_capture_unavailable(
+                    f"Camera open failed: {exc}; reconnecting."
+                )
+                await self.manager.broadcast()
+                await asyncio.sleep(CAPTURE_RECONNECT_DELAY_SEC)
+                continue
+            if capture is None or not capture.isOpened():
+                self._mark_capture_unavailable(f"Could not open camera URL: {self.url}")
                 await self._maybe_broadcast()
-                await asyncio.sleep(0)
-        finally:
-            await asyncio.to_thread(capture.release)
+                await asyncio.sleep(CAPTURE_RECONNECT_DELAY_SEC)
+                continue
 
-    def _should_detect(self, now: float) -> bool:
+            try:
+                while self.running:
+                    try:
+                        ok, frame = await asyncio.wait_for(
+                            asyncio.to_thread(capture.read),
+                            timeout=CAPTURE_READ_TIMEOUT_SEC,
+                        )
+                    except asyncio.TimeoutError:
+                        self._mark_capture_unavailable(
+                            "Camera read timed out; reconnecting."
+                        )
+                        await self.manager.broadcast()
+                        break
+                    except Exception as exc:
+                        self._mark_capture_unavailable(
+                            f"Camera read failed: {exc}; reconnecting."
+                        )
+                        await self.manager.broadcast()
+                        break
+
+                    if not ok or frame is None:
+                        self._mark_capture_unavailable(
+                            "Camera URL did not return a frame; reconnecting."
+                        )
+                        await self._maybe_broadcast()
+                        break
+
+                    self.last_error = None
+                    self.frames_seen += 1
+                    self.frame_index += 1
+                    now = time.time()
+                    self.last_frame_at = now
+                    self.frame_times.append(now)
+                    while self.frame_times and now - self.frame_times[0] > 2.0:
+                        self.frame_times.popleft()
+
+                    self.latest_frame = frame
+                    self.latest_frame_seq += 1
+                    if self._should_sample_detection(now):
+                        self.last_detection_sample_at = now
+                        timestamp = time.monotonic() - self.manager.started_at
+                        dropped = _put_latest(
+                            self.detection_queue,
+                            DetectionJob(
+                                generation=self.generation,
+                                frame_index=self.frame_index,
+                                timestamp_sec=timestamp,
+                                image_bgr=frame,
+                            ),
+                        )
+                        self.dropped_detection_frames += dropped
+
+                    await self._maybe_broadcast()
+                    await asyncio.sleep(0)
+            finally:
+                await asyncio.to_thread(capture.release)
+
+            if self.running:
+                await asyncio.sleep(CAPTURE_RECONNECT_DELAY_SEC)
+
+    def _open_capture(self) -> Any:
+        parsed = urlparse(self.url)
+        if parsed.scheme in {"http", "https"}:
+            return MjpegCapture(self.url)
+
+        params: list[int] = []
+        if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+            params.extend([cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000])
+        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+            params.extend([cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000])
+
+        capture = None
+        if params and hasattr(cv2, "CAP_FFMPEG"):
+            capture = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG, params)
+            if capture is not None and not capture.isOpened():
+                capture.release()
+                capture = None
+
+        if capture is None:
+            capture = cv2.VideoCapture(self.url)
+        if capture is not None and capture.isOpened():
+            if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return capture
+
+    async def _preview_loop(self) -> None:
+        last_encoded_source_seq = -1
+        while self.running:
+            frame = self.latest_frame
+            source_seq = self.latest_frame_seq
+            if frame is not None and source_seq != last_encoded_source_seq:
+                try:
+                    encode_ok, encoded = await asyncio.to_thread(
+                        cv2.imencode,
+                        ".jpg",
+                        frame,
+                        [cv2.IMWRITE_JPEG_QUALITY, 78],
+                    )
+                    if encode_ok:
+                        self.latest_jpeg = encoded.tobytes()
+                        self.latest_jpeg_seq += 1
+                        self.last_preview_encoded_at = time.time()
+                        last_encoded_source_seq = source_seq
+                        await self._maybe_broadcast()
+                except Exception as exc:
+                    self.last_error = f"Preview encode failed: {exc}"
+                    await self.manager.broadcast()
+            await asyncio.sleep(1.0 / PREVIEW_STREAM_FPS)
+
+    def _should_encode_preview(self, now: float) -> bool:
         return (
-            not self.detection_running
-            and now - self.last_detection_started_at >= 1.0 / DETECTION_FPS
+            self.latest_jpeg is None
+            or now - self.last_preview_encoded_at >= 1.0 / PREVIEW_STREAM_FPS
         )
 
-    async def _process_detection(
-        self, image_bgr: Any, frame_index: int, timestamp_sec: float
-    ) -> None:
-        try:
-            frame = Frame(
-                index=frame_index,
-                timestamp_sec=timestamp_sec,
-                image_bgr=image_bgr,
-                source_id=self.id,
-            )
-            detection = await asyncio.to_thread(self.detector.detect, frame)
-            accepted, _ = self.accumulator.observe(detection, image_bgr)
-            self.latest_detection = detection
-            self.latest_detection_wall_time = time.time()
-            if accepted:
-                self._save_latest_candidate_screenshot()
-                self.accumulator.solve_if_due()
-        except Exception as exc:
-            self.last_error = f"Detection failed: {exc}"
-        finally:
-            self.detection_running = False
-            await self.manager.broadcast()
+    def _should_sample_detection(self, now: float) -> bool:
+        return (
+            self.last_detection_sample_at <= 0
+            or now - self.last_detection_sample_at >= 1.0 / DETECTION_FPS
+        )
 
-    def _save_latest_candidate_screenshot(self) -> None:
-        if not self.accumulator.candidates:
-            return
-        item = self.accumulator.candidates[-1]
+    async def _detection_loop(self) -> None:
+        while self.running:
+            try:
+                job = await asyncio.wait_for(self.detection_queue.get(), timeout=0.20)
+            except asyncio.TimeoutError:
+                continue
+
+            try:
+                if job.generation != self.generation:
+                    continue
+
+                self.detection_running = True
+                self.last_detection_started_at = time.time()
+                frame = Frame(
+                    index=job.frame_index,
+                    timestamp_sec=job.timestamp_sec,
+                    image_bgr=job.image_bgr,
+                    source_id=self.id,
+                )
+                detection = await asyncio.to_thread(self.detector.detect, frame)
+                if job.generation != self.generation:
+                    continue
+
+                accepted, _ = self.accumulator.observe(detection, job.image_bgr)
+                self.latest_detection = detection
+                self.latest_detection_wall_time = time.time()
+                if accepted and self.accumulator.candidates:
+                    candidate = self.accumulator.candidates[-1]
+                    self.dropped_screenshot_jobs += _put_latest(
+                        self.screenshot_queue,
+                        ScreenshotJob(generation=job.generation, candidate=candidate),
+                    )
+                    self._enqueue_solve_if_due(job.generation)
+            except Exception as exc:
+                self.last_error = f"Detection failed: {exc}"
+            finally:
+                self.detection_running = False
+                self.detection_queue.task_done()
+                await self.manager.broadcast()
+
+    async def _solver_loop(self) -> None:
+        while self.running:
+            try:
+                job = await asyncio.wait_for(self.solve_queue.get(), timeout=0.20)
+            except asyncio.TimeoutError:
+                continue
+
+            try:
+                if job.generation != self.generation:
+                    continue
+                self.solver_running = True
+                result = await asyncio.to_thread(
+                    self.accumulator.solve_snapshot, job.candidates
+                )
+                if result is None or job.generation != self.generation:
+                    continue
+                self._commit_solve_result(job, result)
+                if self.accumulator.should_solve():
+                    self._enqueue_solve_if_due(
+                        job.generation, allow_while_running=True
+                    )
+            except Exception as exc:
+                self.last_error = f"Calibration solve failed: {exc}"
+            finally:
+                self.solver_running = False
+                self.solve_queue.task_done()
+                await self.manager.broadcast()
+
+    async def _screenshot_loop(self) -> None:
+        while self.running:
+            try:
+                job = await asyncio.wait_for(self.screenshot_queue.get(), timeout=0.20)
+            except asyncio.TimeoutError:
+                continue
+
+            try:
+                if job.generation != self.generation:
+                    continue
+                self.screenshot_running = True
+                path = await asyncio.to_thread(
+                    self._write_candidate_screenshot, job.candidate
+                )
+                if job.generation == self.generation:
+                    self.last_screenshot_path = str(path)
+            except Exception as exc:
+                self.last_error = f"Screenshot write failed: {exc}"
+            finally:
+                self.screenshot_running = False
+                self.screenshot_queue.task_done()
+                await self.manager.broadcast()
+
+    def _enqueue_solve_if_due(
+        self, generation: int, *, allow_while_running: bool = False
+    ) -> bool:
+        if generation != self.generation:
+            return False
+        if (
+            self.solver_running
+            and not allow_while_running
+        ) or self.solve_queue.qsize() > 0:
+            return False
+        if not self.accumulator.should_solve():
+            return False
+        try:
+            self.solve_queue.put_nowait(
+                SolveJob(
+                    generation=generation,
+                    candidates=list(self.accumulator.candidates),
+                    consumed_new_frames=self.accumulator.accepted_since_solve,
+                )
+            )
+        except asyncio.QueueFull:
+            return False
+        return True
+
+    def _commit_solve_result(
+        self, job: SolveJob, result: CalibrationSolveResult
+    ) -> bool:
+        if job.generation != self.generation:
+            return False
+        self.accumulator.commit_solve_result(
+            result, consumed_new_frames=job.consumed_new_frames
+        )
+        return True
+
+    def _write_candidate_screenshot(self, item: CandidateFrame) -> Path:
         camera_dir = self.manager.session_dir / "screenshots" / slugify_label(
             self.label, self.id
         )
-        self.last_screenshot_path = str(
-            self.accumulator.write_candidate_screenshot(item, camera_dir)
-        )
+        return self.accumulator.write_candidate_screenshot(item, camera_dir)
+
+    def _clear_pipeline_queues(self) -> None:
+        _clear_queue(self.detection_queue)
+        _clear_queue(self.solve_queue)
+        _clear_queue(self.screenshot_queue)
+
+    def _clear_preview_state(self) -> None:
+        self.latest_frame = None
+        self.latest_frame_seq += 1
+        self.latest_jpeg = None
+        self.latest_jpeg_seq += 1
+        self.last_frame_at = None
+        self.last_preview_encoded_at = 0.0
+        self.frame_times.clear()
+
+    def _mark_capture_unavailable(self, reason: str) -> None:
+        self.last_error = reason
+        self._clear_preview_state()
+
+    def reset_calibration(
+        self, session_dir: Path, target_metadata: dict[str, Any]
+    ) -> None:
+        self.generation += 1
+        self._clear_pipeline_queues()
+        self.accumulator = self._new_accumulator(session_dir, target_metadata)
+        self.latest_detection = None
+        self.latest_detection_wall_time = None
+        self.last_screenshot_path = None
+        self.detection_running = False
+        self.solver_running = False
+        self.screenshot_running = False
 
     async def _maybe_broadcast(self) -> None:
         now = time.time()
@@ -220,9 +678,25 @@ class ManagedCamera:
         detection = self.latest_detection
         if detection is None or self.latest_detection_wall_time is None:
             return False
+        if self.last_frame_at is None or now - self.last_frame_at > FRAME_STALE_SEC:
+            return False
         if now - self.latest_detection_wall_time > 1.25:
             return False
         return detection.charuco_count >= self.accumulator.min_corners
+
+    def has_fresh_preview(self, now: float) -> bool:
+        return (
+            self.latest_jpeg is not None
+            and self.last_frame_at is not None
+            and now - self.last_frame_at <= FRAME_STALE_SEC
+        )
+
+    def connected(self, now: float) -> bool:
+        return (
+            self.running
+            and self.last_frame_at is not None
+            and now - self.last_frame_at <= FRAME_STALE_SEC
+        )
 
     def rms_value(self) -> float | None:
         calibration = self.accumulator.last_calibration
@@ -232,31 +706,65 @@ class ManagedCamera:
 
     def public_snapshot(self, now: float) -> dict[str, Any]:
         rms = self.rms_value()
+        solve_pool_stats = self.accumulator.solve_pool_stats()
+        selected_frames = (
+            self.accumulator.last_calibration.selected_count
+            if self.accumulator.last_calibration
+            else 0
+        )
         detection = (
             self.latest_detection.to_public_dict() if self.latest_detection else None
         )
         return {
             "id": self.id,
+            "generation": self.generation,
             "label": self.label,
             "url": self.url,
             "running": self.running,
-            "connected": self.running and self.last_frame_at is not None,
+            "connected": self.connected(now),
             "framesSeen": self.frames_seen,
             "fps": self.fps(),
             "lastFrameAt": self.last_frame_at,
             "lastError": self.last_error,
-            "hasLatestFrame": self.latest_jpeg is not None,
+            "hasLatestFrame": self.has_fresh_preview(now),
             "detectingCharuco": self.detecting_charuco(now),
             "detection": detection,
+            "minCandidateCorners": self.accumulator.min_corners,
+            "minSolveFrames": self.accumulator.min_solve_frames,
+            "minSolveCorners": self.accumulator.min_solve_corners,
+            "maxCalibrationFrames": self.accumulator.max_calib_frames,
+            "lastAcceptReason": self.accumulator.last_accept_reason,
             "candidateFrames": len(self.accumulator.candidates),
-            "selectedFrames": self.accumulator.last_calibration.selected_count
-            if self.accumulator.last_calibration
-            else 0,
+            "solvePoolFrames": solve_pool_stats["solvePoolFrames"],
+            "weakSolveFrames": solve_pool_stats["weakSolveFrames"],
+            "usingStrongSolvePool": solve_pool_stats["usingStrongSolvePool"],
+            "selectedFrames": selected_frames,
+            "calculationFrames": selected_frames,
+            "acceptedSinceSolve": self.accumulator.accepted_since_solve,
+            "duplicatePoseFrames": self.accumulator.duplicate_pose_rejections,
+            "duplicateImageFrames": self.accumulator.duplicate_image_rejections,
+            "quality": self.accumulator.last_quality,
+            "solveHistory": self.accumulator.solve_history[-6:],
+            "solveDue": self.accumulator.should_solve(),
             "rms": rms,
             "rmsDisplay": "--" if rms is None else f"{rms:.2f}",
             "errorGrade": rms_grade(rms),
             "errorColor": rms_color(rms),
             "lastScreenshotPath": self.last_screenshot_path,
+            "pipeline": {
+                "captureRunning": _task_running(self.capture_task),
+                "previewRunning": _task_running(self.preview_task),
+                "detectionRunning": self.detection_running,
+                "solverRunning": self.solver_running,
+                "screenshotRunning": self.screenshot_running,
+                "detectionQueueDepth": self.detection_queue.qsize(),
+                "solveQueueDepth": self.solve_queue.qsize(),
+                "screenshotQueueDepth": self.screenshot_queue.qsize(),
+                "droppedDetectionFrames": self.dropped_detection_frames,
+                "droppedScreenshotJobs": self.dropped_screenshot_jobs,
+                "previewFpsLimit": PREVIEW_STREAM_FPS,
+                "detectionFpsLimit": DETECTION_FPS,
+            },
         }
 
 
@@ -329,17 +837,7 @@ class MultiCameraCalibrationState:
         self.session_dir = RUNS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir.mkdir(parents=True, exist_ok=True)
         for camera in self.cameras.values():
-            camera.accumulator = CalibrationAccumulator(
-                DEFAULT_BOARD,
-                self.session_dir / "ephemeral" / camera.id,
-                auto_export=False,
-                create_run_dir=False,
-            )
-            camera.accumulator.source_id = camera.id
-            camera.accumulator.target_metadata = self.target_metadata
-            camera.latest_detection = None
-            camera.latest_detection_wall_time = None
-            camera.last_screenshot_path = None
+            camera.reset_calibration(self.session_dir, self.target_metadata)
         self.focus = FocusTracker()
         await self.broadcast()
         return self.metrics()
@@ -374,9 +872,9 @@ def rms_color(rms: float | None) -> str:
     if rms is None:
         return "rgba(255,255,255,0.36)"
     stops = [
-        (0.60, (39, 196, 111)),
-        (1.00, (240, 180, 60)),
-        (1.60, (255, 80, 69)),
+        (0.80, (22, 163, 74)),
+        (1.20, (234, 179, 8)),
+        (1.80, (220, 38, 38)),
     ]
     if rms <= stops[0][0]:
         rgb = stops[0][1]
@@ -523,7 +1021,7 @@ def create_app() -> FastAPI:
     @app.get("/api/cameras/{camera_id}/latest.jpg")
     async def camera_latest(camera_id: str, request: Request) -> Response:
         camera = request.app.state.live.cameras.get(camera_id)
-        if camera is None or camera.latest_jpeg is None:
+        if camera is None or not camera.has_fresh_preview(time.time()):
             return Response(status_code=204)
         return Response(
             camera.latest_jpeg,
@@ -536,14 +1034,23 @@ def create_app() -> FastAPI:
         async def frames() -> Any:
             last_seq = -1
             boundary = b"--frame\r\n"
+            stream_generation: int | None = None
             while True:
                 if await request.is_disconnected():
                     break
                 camera = request.app.state.live.cameras.get(camera_id)
                 if camera is None:
                     break
+                if stream_generation is None:
+                    stream_generation = camera.generation
+                if camera.generation != stream_generation or not camera.running:
+                    break
                 latest = camera.latest_jpeg
-                if latest is not None and camera.latest_jpeg_seq != last_seq:
+                if (
+                    latest is not None
+                    and camera.has_fresh_preview(time.time())
+                    and camera.latest_jpeg_seq != last_seq
+                ):
                     last_seq = camera.latest_jpeg_seq
                     yield (
                         boundary
@@ -566,7 +1073,7 @@ def create_app() -> FastAPI:
     @app.get("/api/latest-frame.jpg", include_in_schema=False)
     async def legacy_latest_frame(request: Request) -> Response:
         camera = _preview_camera(request.app.state.live)
-        if camera is None or camera.latest_jpeg is None:
+        if camera is None or not camera.has_fresh_preview(time.time()):
             return Response(status_code=204)
         return Response(
             camera.latest_jpeg,
@@ -578,6 +1085,7 @@ def create_app() -> FastAPI:
     async def legacy_latest_stream(request: Request) -> StreamingResponse:
         async def frames() -> Any:
             last_camera_id = ""
+            last_generation = -1
             last_seq = -1
             boundary = b"--frame\r\n"
             while True:
@@ -589,9 +1097,15 @@ def create_app() -> FastAPI:
                     continue
                 latest = camera.latest_jpeg
                 if latest is not None and (
-                    camera.id != last_camera_id or camera.latest_jpeg_seq != last_seq
+                    camera.has_fresh_preview(time.time())
+                    and (
+                        camera.id != last_camera_id
+                        or camera.generation != last_generation
+                        or camera.latest_jpeg_seq != last_seq
+                    )
                 ):
                     last_camera_id = camera.id
+                    last_generation = camera.generation
                     last_seq = camera.latest_jpeg_seq
                     yield (
                         boundary

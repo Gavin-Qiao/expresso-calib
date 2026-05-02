@@ -4,8 +4,12 @@ const elements = {
   form: document.getElementById("cameraForm"),
   label: document.getElementById("cameraLabel"),
   url: document.getElementById("cameraUrl"),
-  startAll: document.getElementById("startAll"),
-  stopAll: document.getElementById("stopAll"),
+  showTargetQr: document.getElementById("showTargetQr"),
+  targetQrDialog: document.getElementById("targetQrDialog"),
+  closeTargetQr: document.getElementById("closeTargetQr"),
+  targetQrImage: document.getElementById("targetQrImage"),
+  targetQrUrl: document.getElementById("targetQrUrl"),
+  toggleStreams: document.getElementById("toggleStreams"),
   list: document.getElementById("cameraList"),
   grid: document.getElementById("cameraGrid"),
   rowTemplate: document.getElementById("cameraRowTemplate"),
@@ -16,6 +20,8 @@ const state = {
   ws: null,
   cameras: [],
   focusedCameraId: null,
+  targetUrl: "",
+  streamsRunning: false,
   streamSrcById: new Map()
 };
 
@@ -25,10 +31,15 @@ async function init() {
   const session = await fetchJson("/api/session");
   elements.url.value = session.defaultCameraUrl || "http://127.0.0.1:3988/stream.mjpg";
   elements.url.placeholder = session.defaultCameraUrl || "http://127.0.0.1:3988/stream.mjpg";
+  state.targetUrl = session.targetUrl || "/target";
+  elements.targetQrUrl.href = state.targetUrl;
+  elements.targetQrUrl.textContent = state.targetUrl;
 
   elements.form.addEventListener("submit", addCamera);
-  elements.startAll.addEventListener("click", startAll);
-  elements.stopAll.addEventListener("click", stopAll);
+  elements.showTargetQr.addEventListener("click", showTargetQr);
+  elements.closeTargetQr.addEventListener("click", closeTargetQr);
+  elements.targetQrDialog.addEventListener("click", closeTargetQrOnBackdrop);
+  elements.toggleStreams.addEventListener("click", toggleStreams);
 
   await refreshCameras();
   connectMetrics();
@@ -60,14 +71,36 @@ async function removeCamera(cameraId) {
   await refreshCameras();
 }
 
-async function startAll() {
-  await fetch("/api/cameras/start-all", { method: "POST" });
-  await refreshCameras();
+async function toggleStreams() {
+  const endpoint = state.streamsRunning
+    ? "/api/cameras/stop-all"
+    : "/api/cameras/start-all";
+  elements.toggleStreams.disabled = true;
+  try {
+    await fetch(endpoint, { method: "POST" });
+    await refreshCameras();
+  } finally {
+    elements.toggleStreams.disabled = false;
+  }
 }
 
-async function stopAll() {
-  await fetch("/api/cameras/stop-all", { method: "POST" });
-  await refreshCameras();
+function showTargetQr() {
+  elements.targetQrImage.src = "/api/qr.png?ts=" + Date.now();
+  if (typeof elements.targetQrDialog.showModal === "function") {
+    elements.targetQrDialog.showModal();
+  } else {
+    elements.targetQrDialog.setAttribute("open", "");
+  }
+}
+
+function closeTargetQr() {
+  elements.targetQrDialog.close();
+}
+
+function closeTargetQrOnBackdrop(event) {
+  if (event.target === elements.targetQrDialog) {
+    closeTargetQr();
+  }
 }
 
 async function refreshCameras() {
@@ -88,8 +121,16 @@ function connectMetrics() {
 function render(payload) {
   state.cameras = payload.cameras || [];
   state.focusedCameraId = payload.focusedCameraId || null;
+  state.streamsRunning = state.cameras.some((camera) => camera.running);
+  renderStreamToggle();
   renderCameraList(state.cameras);
   renderCameraGrid(state.cameras, state.focusedCameraId);
+}
+
+function renderStreamToggle() {
+  elements.toggleStreams.textContent = state.streamsRunning ? "Stop All" : "Start All";
+  elements.toggleStreams.classList.toggle("primary", !state.streamsRunning);
+  elements.toggleStreams.classList.toggle("danger", state.streamsRunning);
 }
 
 function renderCameraList(cameras) {
@@ -135,6 +176,10 @@ function renderCameraGrid(cameras, focusedCameraId) {
     if (!tile) {
       tile = elements.tileTemplate.content.firstElementChild.cloneNode(true);
       tile.dataset.cameraId = camera.id;
+      const image = tile.querySelector(".camera-feed");
+      image.addEventListener("error", () => {
+        state.streamSrcById.delete(camera.id);
+      });
       elements.grid.appendChild(tile);
     }
     updateTile(tile, camera, focusedCameraId);
@@ -152,25 +197,158 @@ function renderCameraGrid(cameras, focusedCameraId) {
 
 function updateTile(tile, camera, focusedCameraId) {
   const image = tile.querySelector(".camera-feed");
-  const digit = tile.querySelector(".error-digit");
-  const shouldStream = camera.running || camera.hasLatestFrame;
+  const placeholderDetail = tile.querySelector(".camera-placeholder-detail");
+  const title = tile.querySelector(".camera-title");
+  const accuracyPanel = tile.querySelector(".accuracy-panel");
+  const accuracyValue = tile.querySelector(".accuracy-value");
+  const accuracyRms = tile.querySelector(".accuracy-rms");
+  const accuracyUsed = tile.querySelector(".accuracy-used");
+  const accuracyFill = tile.querySelector(".accuracy-meter-fill");
+  const badge = tile.querySelector(".detection-badge");
+  const log = tile.querySelector(".camera-log");
+  const hasLiveFrame = Boolean(camera.connected && camera.hasLatestFrame);
+  const shouldStream = hasLiveFrame;
   const streamSrc = `/api/cameras/${encodeURIComponent(camera.id)}/stream.mjpg`;
+  const streamRevision = Number(camera.generation || 0);
+  const streamKey = `${streamSrc}?rev=${streamRevision}`;
+  const detection = camera.detection || {};
+  const charucoCount = Number(detection.charucoCount || 0);
+  const markerCount = Number(detection.markerCount || 0);
+  const minCorners = Number(camera.minCandidateCorners || 12);
+  const hasCurrentTarget = charucoCount > 0;
+  const score = hasCurrentTarget ? accuracyScore(camera.rms) : null;
+  const grade = hasCurrentTarget ? camera.errorGrade || "pending" : "pending";
+  const color = hasCurrentTarget
+    ? camera.errorColor || "rgba(255,255,255,0.42)"
+    : "rgba(255,255,255,0.36)";
 
-  if (shouldStream && state.streamSrcById.get(camera.id) !== streamSrc) {
-    image.src = streamSrc + "?ts=" + Date.now();
-    state.streamSrcById.set(camera.id, streamSrc);
+  if (shouldStream && state.streamSrcById.get(camera.id) !== streamKey) {
+    image.src = streamKey + "&ts=" + Date.now();
+    state.streamSrcById.set(camera.id, streamKey);
   } else if (!shouldStream) {
     image.removeAttribute("src");
     state.streamSrcById.delete(camera.id);
   }
 
   image.alt = camera.label;
-  digit.textContent = camera.rmsDisplay || "--";
-  digit.className = "error-digit " + (camera.errorGrade || "pending");
-  digit.style.setProperty("--error-color", camera.errorColor || "rgba(255,255,255,0.36)");
+  title.textContent = camera.label;
+  placeholderDetail.textContent = cameraPlaceholderText(camera);
+  accuracyPanel.className = "accuracy-panel " + grade;
+  accuracyPanel.style.setProperty("--accuracy-color", color);
+  accuracyPanel.style.setProperty("--accuracy-fill", score === null ? "0%" : `${score}%`);
+  accuracyValue.textContent = score === null ? "--" : `${score}%`;
+  accuracyRms.textContent = accuracyRmsText(camera, hasCurrentTarget);
+  accuracyUsed.textContent = framesUsedText(camera);
+  accuracyFill.style.setProperty("--accuracy-color", color);
+  badge.textContent = detectionBadgeText(charucoCount, markerCount, minCorners);
+  log.textContent = cameraLogText(camera, charucoCount, markerCount, minCorners);
   tile.classList.toggle("is-focused", camera.id === focusedCameraId);
   tile.classList.toggle("is-detecting", Boolean(camera.detectingCharuco));
+  tile.classList.toggle("is-partial", charucoCount > 0 && !camera.detectingCharuco);
   tile.classList.toggle("is-offline", Boolean(camera.lastError));
+  tile.classList.toggle("has-live-frame", hasLiveFrame);
+  tile.classList.toggle("accuracy-good", grade === "good");
+  tile.classList.toggle("accuracy-marginal", grade === "marginal");
+  tile.classList.toggle("accuracy-poor", grade === "poor");
+  tile.classList.toggle("accuracy-pending", grade === "pending");
+}
+
+function accuracyScore(rms) {
+  const value = Number(rms);
+  if (!Number.isFinite(value)) return null;
+  const perfectError = 0.6;
+  const poorError = 1.8;
+  const score = ((poorError - value) / (poorError - perfectError)) * 100;
+  return Math.round(Math.max(0, Math.min(100, score)));
+}
+
+function framesUsedText(camera) {
+  const used = Number(camera.calculationFrames || camera.selectedFrames || 0);
+  const accepted = Number(camera.candidateFrames || 0);
+  const ready = Number(camera.solvePoolFrames || accepted);
+  const minSolve = Number(camera.minSolveFrames || 15);
+  if (used > 0) {
+    if (ready !== accepted) {
+      return `${used}/${ready} solve-ready, ${accepted} accepted`;
+    }
+    return `${used}/${accepted} used`;
+  }
+  return `${ready}/${minSolve} solve-ready`;
+}
+
+function accuracyRmsText(camera, hasCurrentTarget) {
+  if (!hasCurrentTarget) {
+    return "No target";
+  }
+  return Number.isFinite(Number(camera.rms))
+    ? `${Number(camera.rms).toFixed(2)} px RMS`
+    : "No solve";
+}
+
+function detectionBadgeText(charucoCount, markerCount, minCorners) {
+  if (charucoCount > 0) {
+    return `${charucoCount}/${minCorners} corners`;
+  }
+  if (markerCount > 0) {
+    return `${markerCount} marker${markerCount === 1 ? "" : "s"}`;
+  }
+  return "";
+}
+
+function cameraLogText(camera, charucoCount, markerCount, minCorners) {
+  if (camera.lastError) {
+    return camera.lastError;
+  }
+  if (camera.pipeline && camera.pipeline.solverRunning) {
+    return "solving calibration";
+  }
+  if (camera.solveDue) {
+    return `solve queued: ${Number(camera.acceptedSinceSolve || 0)} new`;
+  }
+  if (Number(camera.weakSolveFrames || 0) > 0) {
+    return `${Number(camera.weakSolveFrames || 0)} weak accepted frames ignored`;
+  }
+  if (camera.quality && camera.quality.verdict === "REDO") {
+    return "quality: redo recommended";
+  }
+  if (camera.quality && camera.quality.verdict === "MARGINAL") {
+    return "quality: marginal";
+  }
+  if (camera.lastAcceptReason === "duplicate frame") {
+    return `deduped still frame (${Number(camera.duplicateImageFrames || 0)})`;
+  }
+  if (camera.lastAcceptReason === "duplicate pose") {
+    return `deduped pose (${Number(camera.duplicatePoseFrames || 0)})`;
+  }
+  if (!camera.running) {
+    return "stopped";
+  }
+  if (!camera.connected) {
+    return "waiting for stream";
+  }
+  if (charucoCount >= minCorners) {
+    return `locked: ${charucoCount} corners`;
+  }
+  if (charucoCount > 0) {
+    return `partial: ${charucoCount}/${minCorners} corners`;
+  }
+  if (markerCount > 0) {
+    return `marker-only: ${markerCount} seen`;
+  }
+  return "no markers";
+}
+
+function cameraPlaceholderText(camera) {
+  if (camera.lastError) {
+    return camera.lastError;
+  }
+  if (!camera.running) {
+    return "Start streams to connect";
+  }
+  if (!camera.hasLatestFrame) {
+    return "Waiting for the first fresh frame";
+  }
+  return "Preview is catching up";
 }
 
 function wsUrl(path) {

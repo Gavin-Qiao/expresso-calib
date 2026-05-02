@@ -22,6 +22,7 @@ class CandidateFrame:
     detection: DetectionResult
     image_bgr: np.ndarray
     accepted_at: str
+    image_signature: np.ndarray | None = None
     per_view_error_px: float | None = None
     selected: bool = False
 
@@ -34,6 +35,14 @@ class CalibrationResult:
     per_view_errors_px: list[float]
     selected_count: int
     flags: int
+
+
+@dataclass
+class CalibrationSolveResult:
+    calibration: CalibrationResult
+    quality: dict[str, Any]
+    selected: list[CandidateFrame]
+    candidate_count: int
 
 
 def euclidean(a: Iterable[float], b: Iterable[float]) -> float:
@@ -54,6 +63,16 @@ def percentile(values: list[float], pct: float) -> float | None:
     return float(ordered[lo] * (hi - pos) + ordered[hi] * (pos - lo))
 
 
+def image_signature(image_bgr: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (24, 14), interpolation=cv2.INTER_AREA)
+    return small.astype(np.float32)
+
+
+def signature_distance(left: np.ndarray, right: np.ndarray) -> float:
+    return float(np.mean(np.abs(left - right)))
+
+
 class CalibrationAccumulator:
     def __init__(
         self,
@@ -65,6 +84,15 @@ class CalibrationAccumulator:
         solve_every_new_frames: int = 10,
         max_calib_frames: int = 80,
         max_candidates: int = 250,
+        duplicate_pose_distance: float = 0.045,
+        duplicate_image_pose_distance: float = 0.12,
+        duplicate_image_distance: float = 2.0,
+        outlier_error_floor: float = 1.25,
+        outlier_error_median_factor: float = 2.5,
+        min_outlier_refine_frames: int = 12,
+        min_solve_corners: int | None = None,
+        min_solve_area_fraction: float = 0.018,
+        min_solve_sharpness: float = 25.0,
         auto_export: bool = False,
         create_run_dir: bool = True,
     ) -> None:
@@ -76,6 +104,17 @@ class CalibrationAccumulator:
         self.solve_every_new_frames = solve_every_new_frames
         self.max_calib_frames = max_calib_frames
         self.max_candidates = max_candidates
+        self.duplicate_pose_distance = duplicate_pose_distance
+        self.duplicate_image_pose_distance = duplicate_image_pose_distance
+        self.duplicate_image_distance = duplicate_image_distance
+        self.outlier_error_floor = outlier_error_floor
+        self.outlier_error_median_factor = outlier_error_median_factor
+        self.min_outlier_refine_frames = min_outlier_refine_frames
+        self.min_solve_corners = min_solve_corners or max(
+            min_corners, int(round(board_config.charuco_corners * 0.45))
+        )
+        self.min_solve_area_fraction = min_solve_area_fraction
+        self.min_solve_sharpness = min_solve_sharpness
         self.auto_export = auto_export
         self.create_run_dir = create_run_dir
         self.run_dir = self._make_run_dir()
@@ -87,6 +126,8 @@ class CalibrationAccumulator:
         self.solve_history: list[dict[str, Any]] = []
         self.accepted_since_solve = 0
         self.total_frames_seen = 0
+        self.duplicate_pose_rejections = 0
+        self.duplicate_image_rejections = 0
         self.last_accept_reason = "waiting for frames"
         self.target_metadata: dict[str, Any] = {}
         self.source_id = "browser_upload"
@@ -101,6 +142,8 @@ class CalibrationAccumulator:
         self.solve_history = []
         self.accepted_since_solve = 0
         self.total_frames_seen = 0
+        self.duplicate_pose_rejections = 0
+        self.duplicate_image_rejections = 0
         self.last_accept_reason = "reset"
 
     def _make_run_dir(self) -> Path:
@@ -130,13 +173,33 @@ class CalibrationAccumulator:
             return False, reason
 
         feature = detection.feature_vector()
+        nearest_pose = None
         if self.candidates:
-            nearest = min(
+            nearest_pose = min(
                 euclidean(feature, item.detection.feature_vector())
                 for item in self.candidates
             )
-            if nearest < 0.045:
+            if nearest_pose < self.duplicate_pose_distance:
                 reason = "duplicate pose"
+                self.duplicate_pose_rejections += 1
+                self.last_accept_reason = reason
+                return False, reason
+
+        signature = image_signature(image_bgr)
+        if self.candidates and nearest_pose is not None:
+            image_distances = [
+                signature_distance(signature, item.image_signature)
+                for item in self.candidates
+                if item.image_signature is not None
+            ]
+            nearest_image = min(image_distances) if image_distances else None
+            if (
+                nearest_image is not None
+                and nearest_pose < self.duplicate_image_pose_distance
+                and nearest_image < self.duplicate_image_distance
+            ):
+                reason = "duplicate frame"
+                self.duplicate_image_rejections += 1
                 self.last_accept_reason = reason
                 return False, reason
 
@@ -145,6 +208,7 @@ class CalibrationAccumulator:
                 detection=detection,
                 image_bgr=image_bgr.copy(),
                 accepted_at=datetime.now().isoformat(timespec="seconds"),
+                image_signature=signature,
             )
         )
         self.accepted_since_solve += 1
@@ -165,13 +229,99 @@ class CalibrationAccumulator:
         if not force and not self.should_solve():
             return self.last_calibration
 
-        selected = self.select_diverse(self.candidates, self.max_calib_frames)
-        if len(selected) < 4:
+        result = self.solve_snapshot(list(self.candidates))
+        if result is None:
             return self.last_calibration
-        calibration = self._calibrate(selected)
-        quality = self.summarize_quality(selected, calibration)
+        return self.commit_solve_result(result)
+
+    def solve_snapshot(
+        self, candidates: list[CandidateFrame]
+    ) -> CalibrationSolveResult | None:
+        if len(candidates) < self.min_solve_frames:
+            return None
+
+        solve_pool, solve_pool_stats = self._solve_pool(candidates)
+        selected = self.select_diverse(
+            solve_pool, self.max_calib_frames, mark_selected=False
+        )
+        if len(selected) < 4:
+            return None
+
+        initial_calibration = self._calibrate(selected, assign_per_view_errors=False)
+        selected, calibration, rejected_outliers, outlier_threshold = (
+            self._refine_outlier_views(selected, initial_calibration)
+        )
+        quality = self.summarize_quality(
+            selected, calibration, usable_frames=len(solve_pool)
+        )
+        quality.update(solve_pool_stats)
+        quality["initialRmsReprojectionErrorPx"] = (
+            initial_calibration.rms_reprojection_error_px
+        )
+        quality["outlierRejection"] = {
+            "rejectedFrames": rejected_outliers,
+            "thresholdPx": outlier_threshold,
+            "initialSelectedFrames": len(selected) + rejected_outliers,
+        }
+        if rejected_outliers:
+            quality["warnings"].append(
+                f"Excluded {rejected_outliers} high-error selected frame"
+                f"{'' if rejected_outliers == 1 else 's'} before final solve."
+            )
+            if quality.get("verdict") == "GOOD":
+                quality["verdict"] = "MARGINAL"
+        return CalibrationSolveResult(
+            calibration=calibration,
+            quality=quality,
+            selected=selected,
+            candidate_count=len(candidates),
+        )
+
+    def _solve_pool(
+        self, candidates: list[CandidateFrame]
+    ) -> tuple[list[CandidateFrame], dict[str, Any]]:
+        strong = [
+            item
+            for item in candidates
+            if item.detection.charuco_count >= self.min_solve_corners
+            and item.detection.area_fraction >= self.min_solve_area_fraction
+            and item.detection.sharpness >= self.min_solve_sharpness
+        ]
+        use_strong = len(strong) >= self.min_solve_frames
+        pool = list(strong if use_strong else candidates)
+        return pool, {
+            "acceptedFrames": len(candidates),
+            "solvePoolFrames": len(pool),
+            "weakSolveFrames": max(0, len(candidates) - len(pool)),
+            "minSolveCorners": self.min_solve_corners,
+            "minSolveAreaFraction": self.min_solve_area_fraction,
+            "minSolveSharpness": self.min_solve_sharpness,
+            "usingStrongSolvePool": use_strong,
+        }
+
+    def solve_pool_stats(self) -> dict[str, Any]:
+        _, stats = self._solve_pool(self.candidates)
+        return stats
+
+    def commit_solve_result(
+        self,
+        result: CalibrationSolveResult,
+        *,
+        consumed_new_frames: int | None = None,
+    ) -> CalibrationResult:
+        selected_ids = {id(item) for item in result.selected}
+        per_view_by_id = {
+            id(item): error
+            for item, error in zip(result.selected, result.calibration.per_view_errors_px)
+        }
+        for item in self.candidates:
+            item.selected = id(item) in selected_ids
+            if item.selected and id(item) in per_view_by_id:
+                item.per_view_error_px = per_view_by_id[id(item)]
+
+        calibration = result.calibration
         self.last_calibration = calibration
-        self.last_quality = quality
+        self.last_quality = result.quality
         self.k_history.append(calibration.camera_matrix.astype(float).tolist())
         self.k_history = self.k_history[-8:]
         k = calibration.camera_matrix
@@ -179,7 +329,7 @@ class CalibrationAccumulator:
             {
                 "index": len(self.solve_history) + 1,
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "candidateFrames": len(self.candidates),
+                "candidateFrames": result.candidate_count,
                 "selectedFrames": calibration.selected_count,
                 "rmsReprojectionErrorPx": calibration.rms_reprojection_error_px,
                 "fx": float(k[0, 0]),
@@ -188,10 +338,42 @@ class CalibrationAccumulator:
                 "cy": float(k[1, 2]),
             }
         )
-        self.accepted_since_solve = 0
+        if consumed_new_frames is None:
+            self.accepted_since_solve = 0
+        else:
+            self.accepted_since_solve = max(
+                0, self.accepted_since_solve - consumed_new_frames
+            )
         if self.auto_export:
             self.export()
         return calibration
+
+    def _refine_outlier_views(
+        self, selected: list[CandidateFrame], calibration: CalibrationResult
+    ) -> tuple[list[CandidateFrame], CalibrationResult, int, float | None]:
+        errors = calibration.per_view_errors_px
+        if len(selected) < self.min_outlier_refine_frames or len(errors) != len(selected):
+            return selected, calibration, 0, None
+
+        median_error = percentile(errors, 50)
+        if median_error is None:
+            return selected, calibration, 0, None
+
+        threshold = max(
+            self.outlier_error_floor,
+            median_error * self.outlier_error_median_factor,
+        )
+        kept = [
+            item
+            for item, error in zip(selected, errors)
+            if float(error) <= threshold
+        ]
+        minimum_kept = max(4, min(self.min_outlier_refine_frames, len(selected)))
+        if len(kept) == len(selected) or len(kept) < minimum_kept:
+            return selected, calibration, 0, threshold
+
+        refined = self._calibrate(kept, assign_per_view_errors=False)
+        return kept, refined, len(selected) - len(kept), threshold
 
     def write_candidate_screenshot(
         self, item: CandidateFrame, screenshot_dir: Path
@@ -206,13 +388,19 @@ class CalibrationAccumulator:
         return path
 
     def select_diverse(
-        self, candidates: list[CandidateFrame], max_frames: int
+        self,
+        candidates: list[CandidateFrame],
+        max_frames: int,
+        *,
+        mark_selected: bool = True,
     ) -> list[CandidateFrame]:
-        for item in candidates:
-            item.selected = False
-        if len(candidates) <= max_frames:
+        if mark_selected:
             for item in candidates:
-                item.selected = True
+                item.selected = False
+        if len(candidates) <= max_frames:
+            if mark_selected:
+                for item in candidates:
+                    item.selected = True
             return list(candidates)
 
         def quality(item: CandidateFrame) -> float:
@@ -251,12 +439,18 @@ class CalibrationAccumulator:
             remaining.remove(next_item)
 
         selected.sort(key=lambda item: item.detection.frame_index)
-        selected_ids = {id(item) for item in selected}
-        for item in candidates:
-            item.selected = id(item) in selected_ids
+        if mark_selected:
+            selected_ids = {id(item) for item in selected}
+            for item in candidates:
+                item.selected = id(item) in selected_ids
         return selected
 
-    def _calibrate(self, selected: list[CandidateFrame]) -> CalibrationResult:
+    def _calibrate(
+        self,
+        selected: list[CandidateFrame],
+        *,
+        assign_per_view_errors: bool = True,
+    ) -> CalibrationResult:
         object_points, image_points = self._calibration_points(selected)
         first = selected[0].detection
         image_size = (first.width, first.height)
@@ -290,8 +484,9 @@ class CalibrationAccumulator:
             flattened = [float(x) for x in np.asarray(per_view).reshape(-1)]
             if len(flattened) == len(selected):
                 computed_per_view = flattened
-        for candidate, error in zip(selected, computed_per_view):
-            candidate.per_view_error_px = error
+        if assign_per_view_errors:
+            for candidate, error in zip(selected, computed_per_view):
+                candidate.per_view_error_px = error
 
         return CalibrationResult(
             rms_reprojection_error_px=float(rms),
@@ -345,7 +540,11 @@ class CalibrationAccumulator:
         return errors
 
     def summarize_quality(
-        self, selected: list[CandidateFrame], calibration: CalibrationResult
+        self,
+        selected: list[CandidateFrame],
+        calibration: CalibrationResult,
+        *,
+        usable_frames: int | None = None,
     ) -> dict[str, Any]:
         first = selected[0].detection
         width = max(1, first.width)
@@ -411,7 +610,9 @@ class CalibrationAccumulator:
             "redFlags": red,
             "warnings": yellow,
             "selectedFrames": len(selected),
-            "usableFrames": len(self.candidates),
+            "usableFrames": len(self.candidates)
+            if usable_frames is None
+            else usable_frames,
             "cornerCount": {
                 "min": min(corner_counts) if corner_counts else 0,
                 "median": float(statistics.median(corner_counts))

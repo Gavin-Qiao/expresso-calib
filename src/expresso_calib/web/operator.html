@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Expresso Calib Operator</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260502-multi" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260502-solvepool" />
   </head>
   <body class="operator-body">
     <main class="calib-console">
@@ -18,14 +18,23 @@
           <button id="addCamera" type="submit" class="primary">Add</button>
         </form>
         <div class="run-actions">
-          <button id="startAll" type="button" class="primary">Start All</button>
-          <button id="stopAll" type="button">Stop All</button>
+          <button id="showTargetQr" type="button">Target QR</button>
+          <button id="toggleStreams" type="button" class="primary">Start All</button>
         </div>
       </section>
 
       <section id="cameraList" class="camera-list" aria-label="Camera sources"></section>
       <section id="cameraGrid" class="camera-grid" aria-label="Camera streams"></section>
     </main>
+
+    <dialog id="targetQrDialog" class="qr-dialog" aria-labelledby="targetQrTitle">
+      <div class="qr-dialog-head">
+        <h2 id="targetQrTitle">Target QR</h2>
+        <button id="closeTargetQr" type="button" aria-label="Close target QR">Close</button>
+      </div>
+      <img id="targetQrImage" class="qr-dialog-image" alt="QR code for iPad target" />
+      <a id="targetQrUrl" class="qr-dialog-url" target="_blank" rel="noopener"></a>
+    </dialog>
 
     <template id="cameraRowTemplate">
       <article class="camera-row">
@@ -38,10 +47,27 @@
     <template id="cameraTileTemplate">
       <article class="camera-tile">
         <img class="camera-feed" alt="" />
-        <div class="error-digit" aria-live="polite">--</div>
+        <div class="camera-placeholder" aria-live="polite">
+          <strong class="camera-placeholder-title">No live frames</strong>
+          <span class="camera-placeholder-detail">Waiting for camera stream</span>
+        </div>
+        <div class="camera-chrome">
+          <div class="camera-title"></div>
+          <div class="accuracy-panel" aria-live="polite">
+            <span class="accuracy-label">Accuracy</span>
+            <strong class="accuracy-value">--</strong>
+            <span class="accuracy-rms">No solve</span>
+            <span class="accuracy-used">0 used</span>
+            <span class="accuracy-meter"><span class="accuracy-meter-fill"></span></span>
+          </div>
+        </div>
+        <div class="camera-footer">
+          <div class="detection-badge"></div>
+          <div class="camera-log"></div>
+        </div>
       </article>
     </template>
 
-    <script src="/static/operator.js?v=20260502-multi"></script>
+    <script src="/static/operator.js?v=20260502-solvepool"></script>
   </body>
 </html>
