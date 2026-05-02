@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from expresso_calib.board import DEFAULT_BOARD
-from expresso_calib.calibration import CalibrationAccumulator
+from expresso_calib.calibration import CalibrationAccumulator, CalibrationResult
 from expresso_calib.detection import DetectionResult
 
 
@@ -91,3 +91,51 @@ def test_accumulator_rejects_weak_frames(tmp_path) -> None:
 
     assert accepted is False
     assert reason == "board is too small"
+
+
+def test_solve_does_not_export_artifacts_by_default(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD,
+        tmp_path,
+        min_solve_frames=2,
+        solve_every_new_frames=2,
+        create_run_dir=False,
+    )
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+
+    def fake_calibrate(selected):
+        return CalibrationResult(
+            rms_reprojection_error_px=0.72,
+            camera_matrix=np.eye(3, dtype=float),
+            distortion_coefficients=np.zeros(5, dtype=float),
+            per_view_errors_px=[0.5 for _ in selected],
+            selected_count=len(selected),
+            flags=0,
+        )
+
+    accumulator._calibrate = fake_calibrate
+    accumulator.observe(fake_detection(frame_index=1, center_x=0.2, center_y=0.2), image)
+    accumulator.observe(fake_detection(frame_index=2, center_x=0.7, center_y=0.2), image)
+    accumulator.observe(fake_detection(frame_index=3, center_x=0.2, center_y=0.7), image)
+    accumulator.observe(fake_detection(frame_index=4, center_x=0.7, center_y=0.7), image)
+    accumulator.solve_if_due()
+
+    assert accumulator.last_calibration is not None
+    assert list(tmp_path.rglob("calibration.json")) == []
+    assert list(tmp_path.rglob("report.md")) == []
+    assert list(tmp_path.rglob("detections.csv")) == []
+
+
+def test_candidate_screenshot_is_written(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    accepted, _ = accumulator.observe(
+        fake_detection(frame_index=1, center_x=0.5, center_y=0.5), image
+    )
+
+    assert accepted is True
+    path = accumulator.write_candidate_screenshot(
+        accumulator.candidates[-1], tmp_path / "screenshots"
+    )
+    assert path.exists()
+    assert path.suffix == ".jpg"

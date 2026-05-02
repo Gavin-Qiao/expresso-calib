@@ -4,102 +4,44 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Expresso Calib Operator</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260502-url" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260502-multi" />
   </head>
-  <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <div class="brand">
+  <body class="operator-body">
+    <main class="calib-console">
+      <section class="source-strip">
+        <div class="brand compact">
           <h1>Expresso Calib</h1>
-          <p>Live ChaRuCo intrinsic calibration from a camera stream URL.</p>
         </div>
-        <div class="actions">
-          <form id="cameraSourceForm" class="source-form">
-            <label for="cameraUrl">Camera URL</label>
-            <input id="cameraUrl" type="url" autocomplete="off" spellcheck="false" />
-            <button id="cameraToggle" class="primary" type="submit">Connect</button>
-          </form>
-          <button id="resetRun">Reset Run</button>
-          <button id="exportRun">Save Report</button>
+        <form id="cameraForm" class="camera-form">
+          <input id="cameraLabel" type="text" autocomplete="off" placeholder="Camera name" />
+          <input id="cameraUrl" type="url" autocomplete="off" spellcheck="false" placeholder="Camera stream URL" />
+          <button id="addCamera" type="submit" class="primary">Add</button>
+        </form>
+        <div class="run-actions">
+          <button id="startAll" type="button" class="primary">Start All</button>
+          <button id="stopAll" type="button">Stop All</button>
         </div>
-      </header>
+      </section>
 
-      <main class="operator-main">
-        <section class="video-panel">
-          <div class="video-head">
-            <div class="status-line">
-              <span id="statusDot" class="dot"></span>
-              <span id="guidance" class="guidance">Enter a camera stream URL, connect, and scan the target QR.</span>
-            </div>
-            <div id="videoMeta" class="video-meta">idle</div>
-          </div>
-          <div class="video-stage">
-            <video id="preview" autoplay playsinline muted></video>
-            <img id="backendPreview" class="backend-preview" alt="Backend camera preview" />
-            <canvas id="overlay" class="overlay"></canvas>
-          </div>
-          <canvas id="capture" class="hidden-capture" width="960" height="540"></canvas>
-          <div class="metrics-grid">
-            <div class="metric">
-              <label>ChaRuCo</label>
-              <strong id="charucoCount">0</strong>
-              <small id="markerCount">0 markers</small>
-            </div>
-            <div class="metric">
-              <label>Accepted</label>
-              <strong id="candidateFrames">0</strong>
-              <small id="selectedFrames">0 selected</small>
-            </div>
-            <div class="metric">
-              <label>RMS</label>
-              <strong id="rms">--</strong>
-              <small id="verdict">pending</small>
-            </div>
-            <div class="metric">
-              <label>K Stability</label>
-              <strong id="kStability">--</strong>
-              <small>last solves</small>
-            </div>
-          </div>
-        </section>
+      <section id="cameraList" class="camera-list" aria-label="Camera sources"></section>
+      <section id="cameraGrid" class="camera-grid" aria-label="Camera streams"></section>
+    </main>
 
-        <aside class="side-panel">
-          <section class="qr-block">
-            <h2 class="section-title">iPad Target</h2>
-            <div class="qr-row">
-              <img id="qr" src="/api/qr.png" alt="QR code for the iPad target page" />
-              <div>
-                <div id="targetUrl" class="url-text">loading target URL...</div>
-                <p class="log">Scan this from the iPad, tap Show Board, then move the target through the camera view.</p>
-              </div>
-            </div>
-          </section>
+    <template id="cameraRowTemplate">
+      <article class="camera-row">
+        <strong class="camera-row-label"></strong>
+        <span class="camera-row-url"></span>
+        <button type="button" class="camera-row-remove">Remove</button>
+      </article>
+    </template>
 
-          <section class="details-block">
-            <h2 class="section-title">Run State</h2>
-            <dl class="detail-list">
-              <div><dt>Run</dt><dd id="runDir">--</dd></div>
-              <div><dt>Frames</dt><dd id="framesSeen">0</dd></div>
-              <div><dt title="How much of the camera image has seen detected ChaRuCo corners across selected frames.">Coverage</dt><dd id="coverage">--</dd></div>
-              <div><dt title="Smallest to largest detected board area as a fraction of the image across selected frames.">Board Area</dt><dd id="boardArea">--</dd></div>
-              <div><dt>Target</dt><dd id="targetMeta">unknown/manual</dd></div>
-            </dl>
-          </section>
+    <template id="cameraTileTemplate">
+      <article class="camera-tile">
+        <img class="camera-feed" alt="" />
+        <div class="error-digit" aria-live="polite">--</div>
+      </article>
+    </template>
 
-          <section class="trend-block">
-            <h2 class="section-title" title="Cumulative reprojection RMS over every calibration solve in this run.">Cumulative RMS</h2>
-            <canvas id="rmsTrend" class="trend"></canvas>
-          </section>
-
-          <section class="trend-block">
-            <h2 class="section-title" title="Estimated focal lengths fx and fy, in pixels, over every calibration solve.">Focal Length Trend</h2>
-            <canvas id="focalTrend" class="trend"></canvas>
-            <p id="log" class="log">Waiting for metrics.</p>
-          </section>
-        </aside>
-      </main>
-    </div>
-
-    <script src="/static/operator.js?v=20260502-url"></script>
+    <script src="/static/operator.js?v=20260502-multi"></script>
   </body>
 </html>

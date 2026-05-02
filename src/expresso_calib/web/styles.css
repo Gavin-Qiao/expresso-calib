@@ -369,6 +369,175 @@ button.danger {
   line-height: 1.35;
 }
 
+.operator-body {
+  background: #0d1113;
+  color: #f8fbfb;
+}
+
+.calib-console {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+}
+
+.source-strip {
+  display: grid;
+  grid-template-columns: auto minmax(320px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  background: #f7faf9;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.brand.compact h1 {
+  font-size: 18px;
+  color: var(--ink);
+}
+
+.camera-form {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) minmax(260px, 1fr) auto;
+  gap: 8px;
+}
+
+.camera-form input {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: #fff;
+  color: var(--ink);
+}
+
+.camera-form.has-error input {
+  border-color: var(--red);
+}
+
+.run-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.camera-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+  padding: 10px 12px;
+  background: #141a1d;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.camera-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background: #1b2326;
+}
+
+.camera-row-label {
+  font-size: 13px;
+  color: #f8fbfb;
+}
+
+.camera-row-url {
+  min-width: 0;
+  overflow: hidden;
+  color: #8fa0a5;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.camera-row-remove {
+  padding: 6px 9px;
+  background: #101618;
+  color: #d8e5e7;
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.camera-row.is-running {
+  border-color: rgba(22, 121, 76, 0.75);
+}
+
+.camera-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 10px;
+  align-content: start;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.camera-tile {
+  position: relative;
+  min-height: 220px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #050708;
+  transition:
+    opacity 420ms ease,
+    transform 420ms ease,
+    border-color 220ms ease;
+}
+
+.camera-tile.is-detecting {
+  border-color: rgba(18, 127, 132, 0.95);
+}
+
+.camera-tile.is-offline {
+  border-color: rgba(180, 35, 24, 0.75);
+}
+
+.camera-feed {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform: scaleX(-1);
+}
+
+.error-digit {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--error-color, rgba(255, 255, 255, 0.58));
+  font-size: clamp(64px, 16vw, 210px);
+  font-weight: 800;
+  line-height: 1;
+  text-shadow: 0 2px 26px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+
+.error-digit.pending {
+  color: rgba(255, 255, 255, 0.36);
+}
+
+.camera-grid.focus-mode .camera-tile {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.96);
+}
+
+.camera-grid.focus-mode .camera-tile.is-focused {
+  grid-column: 1 / -1;
+  height: min(78vh, calc(100vh - 150px));
+  min-height: 420px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+
 .target-hint {
   margin: 12px 0 0;
   color: var(--muted);

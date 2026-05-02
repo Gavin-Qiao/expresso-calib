@@ -65,6 +65,8 @@ class CalibrationAccumulator:
         solve_every_new_frames: int = 10,
         max_calib_frames: int = 80,
         max_candidates: int = 250,
+        auto_export: bool = False,
+        create_run_dir: bool = True,
     ) -> None:
         self.board_config = board_config
         self.board = create_board(board_config)
@@ -74,6 +76,8 @@ class CalibrationAccumulator:
         self.solve_every_new_frames = solve_every_new_frames
         self.max_calib_frames = max_calib_frames
         self.max_candidates = max_candidates
+        self.auto_export = auto_export
+        self.create_run_dir = create_run_dir
         self.run_dir = self._make_run_dir()
         self.candidates: list[CandidateFrame] = []
         self.last_detection: DetectionResult | None = None
@@ -102,7 +106,8 @@ class CalibrationAccumulator:
     def _make_run_dir(self) -> Path:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = self.runs_dir / stamp
-        run_dir.mkdir(parents=True, exist_ok=True)
+        if self.create_run_dir:
+            run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
     def observe(
@@ -184,8 +189,21 @@ class CalibrationAccumulator:
             }
         )
         self.accepted_since_solve = 0
-        self.export()
+        if self.auto_export:
+            self.export()
         return calibration
+
+    def write_candidate_screenshot(
+        self, item: CandidateFrame, screenshot_dir: Path
+    ) -> Path:
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        detection = item.detection
+        image = item.image_bgr.copy()
+        if detection.corners is not None and detection.ids is not None:
+            cv2.aruco.drawDetectedCornersCharuco(image, detection.corners, detection.ids)
+        path = screenshot_dir / f"frame_{detection.frame_index:06d}.jpg"
+        cv2.imwrite(str(path), image)
+        return path
 
     def select_diverse(
         self, candidates: list[CandidateFrame], max_frames: int
@@ -677,10 +695,5 @@ class CalibrationAccumulator:
         self, selected: list[CandidateFrame], debug_dir: Path
     ) -> None:
         debug_dir.mkdir(parents=True, exist_ok=True)
-        aruco = cv2.aruco
         for item in selected:
-            detection = item.detection
-            image = item.image_bgr.copy()
-            if detection.corners is not None and detection.ids is not None:
-                aruco.drawDetectedCornersCharuco(image, detection.corners, detection.ids)
-            cv2.imwrite(str(debug_dir / f"frame_{detection.frame_index:06d}.jpg"), image)
+            self.write_candidate_screenshot(item, debug_dir)
