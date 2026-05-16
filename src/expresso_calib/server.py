@@ -562,8 +562,8 @@ class ManagedCamera:
                 if job.generation != self.generation:
                     continue
                 match outcome:
-                    case SolveOk(solve=solve):
-                        self._commit_solve_result(job, solve)
+                    case SolveOk(solve=result):
+                        self._commit_solve_result(job, result)
                         self.last_error = None
                         if self.accumulator.should_solve():
                             self._enqueue_solve_if_due(

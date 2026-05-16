@@ -334,8 +334,6 @@ def test_solve_snapshot_returns_insufficient_data_when_too_few_candidates(tmp_pa
     outcome = accumulator.solve_snapshot([])
     assert isinstance(outcome, SolveInsufficientData)
     assert outcome.reason == "too few candidates"
-    assert outcome.candidate_count == 0
-    assert outcome.needed == 5
 
 
 def test_solve_snapshot_returns_ok_on_successful_solve(tmp_path) -> None:

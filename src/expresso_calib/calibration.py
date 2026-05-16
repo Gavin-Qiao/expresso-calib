@@ -7,7 +7,7 @@ import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Literal, Union
+from typing import Any, Iterable
 
 import cv2
 import numpy as np
@@ -48,24 +48,19 @@ class CalibrationSolveResult:
 @dataclass(frozen=True)
 class SolveOk:
     solve: CalibrationSolveResult
-    kind: Literal["ok"] = "ok"
 
 
 @dataclass(frozen=True)
 class SolveInsufficientData:
     reason: str
-    candidate_count: int
-    needed: int
-    kind: Literal["insufficient_data"] = "insufficient_data"
 
 
 @dataclass(frozen=True)
 class SolveNumericalFailure:
     reason: str
-    kind: Literal["numerical_failure"] = "numerical_failure"
 
 
-SolveOutcome = Union[SolveOk, SolveInsufficientData, SolveNumericalFailure]
+SolveOutcome = SolveOk | SolveInsufficientData | SolveNumericalFailure
 
 
 def euclidean(a: Iterable[float], b: Iterable[float]) -> float:
@@ -259,31 +254,21 @@ class CalibrationAccumulator:
 
     def solve_snapshot(self, candidates: list[CandidateFrame]) -> SolveOutcome:
         if len(candidates) < self.min_solve_frames:
-            return SolveInsufficientData(
-                reason="too few candidates",
-                candidate_count=len(candidates),
-                needed=self.min_solve_frames,
-            )
+            return SolveInsufficientData(reason="too few candidates")
 
         solve_pool, solve_pool_stats = self._solve_pool(candidates)
         selected = self.select_diverse(
             solve_pool, self.max_calib_frames, mark_selected=False
         )
         if len(selected) < 4:
-            return SolveInsufficientData(
-                reason="solve pool too small",
-                candidate_count=len(candidates),
-                needed=max(4, self.min_solve_frames),
-            )
+            return SolveInsufficientData(reason="solve pool too small")
 
         try:
             initial_calibration = self._calibrate(selected, assign_per_view_errors=False)
             selected, calibration, rejected_outliers, outlier_threshold = (
                 self._refine_outlier_views(selected, initial_calibration)
             )
-        except cv2.error as exc:
-            return SolveNumericalFailure(reason=str(exc))
-        except (ValueError, RuntimeError) as exc:
+        except (cv2.error, ValueError, RuntimeError) as exc:
             return SolveNumericalFailure(reason=str(exc))
 
         quality = self.summarize_quality(
