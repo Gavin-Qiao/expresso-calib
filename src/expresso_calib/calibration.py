@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import statistics
 from dataclasses import dataclass
@@ -138,6 +139,7 @@ class CalibrationAccumulator:
         self.create_run_dir = create_run_dir
         self.run_dir = self._make_run_dir()
         self.candidates: list[CandidateFrame] = []
+        self.lock = asyncio.Lock()
         self.last_detection: DetectionResult | None = None
         self.last_calibration: CalibrationResult | None = None
         self.last_quality: dict[str, Any] | None = None

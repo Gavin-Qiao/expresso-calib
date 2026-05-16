@@ -50,29 +50,49 @@ DEFAULT_CAMERA_URL = "http://127.0.0.1:3988/stream.mjpg"
 
 class MetricsHub:
     def __init__(self) -> None:
-        self.clients: set[WebSocket] = set()
+        self.clients: dict[Any, asyncio.Queue[str]] = {}
         self.latest: dict[str, Any] | None = None
+        self._tasks: dict[Any, asyncio.Task[None]] = {}
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: Any) -> None:
         await websocket.accept()
-        self.clients.add(websocket)
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=4)
+        self.clients[websocket] = queue
+        self._tasks[websocket] = asyncio.create_task(self._pump(websocket, queue))
         if self.latest is not None:
-            await websocket.send_text(json.dumps(self.latest))
+            queue.put_nowait(json.dumps(self.latest))
 
-    def disconnect(self, websocket: WebSocket) -> None:
-        self.clients.discard(websocket)
+    def disconnect(self, websocket: Any) -> None:
+        self.clients.pop(websocket, None)
+        task = self._tasks.pop(websocket, None)
+        if task is not None:
+            task.cancel()
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
         self.latest = payload
-        dead: list[WebSocket] = []
         encoded = json.dumps(payload)
-        for client in list(self.clients):
-            try:
-                await client.send_text(encoded)
-            except Exception:
-                dead.append(client)
-        for client in dead:
-            self.disconnect(client)
+        for queue in list(self.clients.values()):
+            while True:
+                try:
+                    queue.put_nowait(encoded)
+                    break
+                except asyncio.QueueFull:
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+
+    async def _pump(self, websocket: Any, queue: asyncio.Queue[str]) -> None:
+        try:
+            while True:
+                encoded = await queue.get()
+                try:
+                    await websocket.send_text(encoded)
+                except Exception:
+                    self.disconnect(websocket)
+                    return
+        except asyncio.CancelledError:
+            return
 
 
 @dataclass(frozen=True)
@@ -528,11 +548,16 @@ class ManagedCamera:
                 if job.generation != self.generation:
                     continue
 
-                accepted, _ = self.accumulator.observe(detection, job.image_bgr)
+                async with self.accumulator.lock:
+                    accepted, _ = self.accumulator.observe(detection, job.image_bgr)
+                    candidate = (
+                        self.accumulator.candidates[-1]
+                        if accepted and self.accumulator.candidates
+                        else None
+                    )
                 self.latest_detection = detection
                 self.latest_detection_wall_time = time.time()
-                if accepted and self.accumulator.candidates:
-                    candidate = self.accumulator.candidates[-1]
+                if candidate is not None:
                     self.dropped_screenshot_jobs += _put_latest(
                         self.screenshot_queue,
                         ScreenshotJob(generation=job.generation, candidate=candidate),
@@ -556,14 +581,17 @@ class ManagedCamera:
                 if job.generation != self.generation:
                     continue
                 self.solver_running = True
+                async with self.accumulator.lock:
+                    snapshot = list(self.accumulator.candidates)
                 outcome = await asyncio.to_thread(
-                    self.accumulator.solve_snapshot, job.candidates
+                    self.accumulator.solve_snapshot, snapshot
                 )
                 if job.generation != self.generation:
                     continue
                 match outcome:
                     case SolveOk(solve=result):
-                        self._commit_solve_result(job, result)
+                        async with self.accumulator.lock:
+                            self._commit_solve_result(job, result)
                         self.last_error = None
                         if self.accumulator.should_solve():
                             self._enqueue_solve_if_due(

@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 
 import numpy as np
+import pytest
 
 from expresso_calib.calibration import CalibrationResult, CalibrationSolveResult
 from expresso_calib.detection import DetectionResult
-from expresso_calib.server import ManagedCamera, SolveJob, _put_latest
+from expresso_calib.server import ManagedCamera, MetricsHub, SolveJob, _put_latest
 
 
 class DummyManager:
@@ -126,3 +127,34 @@ def test_camera_can_queue_followup_solve_while_solver_finishes(tmp_path) -> None
         camera.generation, allow_while_running=True
     ) is True
     assert camera.solve_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_metrics_hub_slow_client_does_not_stall_fast_client() -> None:
+    hub = MetricsHub()
+
+    class FakeClient:
+        def __init__(self, name: str, delay: float) -> None:
+            self.name = name
+            self.delay = delay
+            self.received: list[str] = []
+
+        async def accept(self) -> None:
+            pass
+
+        async def send_text(self, payload: str) -> None:
+            await asyncio.sleep(self.delay)
+            self.received.append(payload)
+
+    slow = FakeClient("slow", delay=0.5)
+    fast = FakeClient("fast", delay=0.0)
+    await hub.connect(slow)  # type: ignore[arg-type]
+    await hub.connect(fast)  # type: ignore[arg-type]
+
+    start = asyncio.get_event_loop().time()
+    await asyncio.wait_for(hub.broadcast({"n": 1}), timeout=0.1)
+    elapsed = asyncio.get_event_loop().time() - start
+
+    assert elapsed < 0.1, f"broadcast blocked for {elapsed:.3f}s on slow client"
+    await asyncio.sleep(0.05)
+    assert fast.received == ['{"n": 1}']

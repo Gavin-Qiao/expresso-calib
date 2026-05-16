@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import cv2
@@ -519,3 +520,54 @@ def test_export_writes_expected_files(tmp_path) -> None:
 
     csv_text = (run_dir / "detections.csv").read_text()
     assert "rejected" in csv_text.splitlines()[0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_observe_and_commit_does_not_corrupt_candidates(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD, tmp_path, min_solve_frames=4, create_run_dir=False
+    )
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+
+    def fake_calibrate(selected, **_kwargs):
+        return CalibrationResult(
+            rms_reprojection_error_px=0.7,
+            camera_matrix=np.eye(3, dtype=float),
+            distortion_coefficients=np.zeros(5, dtype=float),
+            per_view_errors_px=[0.5 for _ in selected],
+            selected_count=len(selected),
+            flags=0,
+        )
+
+    accumulator._calibrate = fake_calibrate
+
+    for i, (cx, cy) in enumerate(
+        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
+    ):
+        accumulator.observe(fake_detection(frame_index=i, center_x=cx, center_y=cy), image)
+
+    async def keep_observing() -> None:
+        for i in range(5, 15):
+            async with accumulator.lock:
+                accumulator.observe(
+                    fake_detection(frame_index=i, center_x=0.3 + i * 0.02, center_y=0.3),
+                    image,
+                )
+                await asyncio.sleep(0)
+
+    async def keep_solving() -> None:
+        for _ in range(5):
+            async with accumulator.lock:
+                snapshot = list(accumulator.candidates)
+            outcome = await asyncio.to_thread(accumulator.solve_snapshot, snapshot)
+            async with accumulator.lock:
+                if isinstance(outcome, SolveOk):
+                    accumulator.commit_solve_result(outcome.solve)
+            await asyncio.sleep(0.001)
+
+    await asyncio.gather(keep_observing(), keep_solving())
+
+    selected = sum(1 for item in accumulator.candidates if item.selected)
+    assert selected <= len(accumulator.candidates)
+    for item in accumulator.candidates:
+        assert item.per_view_error_px is None or isinstance(item.per_view_error_px, float)
