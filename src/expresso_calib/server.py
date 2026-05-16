@@ -22,7 +22,14 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 
 from .board import DEFAULT_BOARD, target_pdf_bytes, target_png_bytes
-from .calibration import CalibrationAccumulator, CalibrationSolveResult, CandidateFrame
+from .calibration import (
+    CalibrationAccumulator,
+    CalibrationSolveResult,
+    CandidateFrame,
+    SolveInsufficientData,
+    SolveNumericalFailure,
+    SolveOk,
+)
 from .detection import CharucoDetector, Frame
 from .multi_camera import FocusTracker, clean_label, slugify_label
 
@@ -549,18 +556,23 @@ class ManagedCamera:
                 if job.generation != self.generation:
                     continue
                 self.solver_running = True
-                result = await asyncio.to_thread(
+                outcome = await asyncio.to_thread(
                     self.accumulator.solve_snapshot, job.candidates
                 )
-                if result is None or job.generation != self.generation:
+                if job.generation != self.generation:
                     continue
-                self._commit_solve_result(job, result)
-                if self.accumulator.should_solve():
-                    self._enqueue_solve_if_due(
-                        job.generation, allow_while_running=True
-                    )
-            except Exception as exc:
-                self.last_error = f"Calibration solve failed: {exc}"
+                match outcome:
+                    case SolveOk(solve=solve):
+                        self._commit_solve_result(job, solve)
+                        self.last_error = None
+                        if self.accumulator.should_solve():
+                            self._enqueue_solve_if_due(
+                                job.generation, allow_while_running=True
+                            )
+                    case SolveInsufficientData():
+                        pass
+                    case SolveNumericalFailure(reason=reason):
+                        self.last_error = f"Calibration solve failed: {reason}"
             finally:
                 self.solver_running = False
                 self.solve_queue.task_done()

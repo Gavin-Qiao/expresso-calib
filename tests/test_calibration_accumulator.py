@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import cv2
 import numpy as np
+import pytest
 
 from expresso_calib.board import DEFAULT_BOARD
-from expresso_calib.calibration import CalibrationAccumulator, CalibrationResult
+from expresso_calib.calibration import (
+    CalibrationAccumulator,
+    CalibrationResult,
+    SolveInsufficientData,
+    SolveNumericalFailure,
+    SolveOk,
+)
 from expresso_calib.detection import DetectionResult
 
 
@@ -177,8 +185,9 @@ def test_snapshot_solve_preserves_samples_collected_while_solving(tmp_path) -> N
         assert accepted is True
 
     consumed = accumulator.accepted_since_solve
-    result = accumulator.solve_snapshot(list(accumulator.candidates))
-    assert result is not None
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveOk)
+    result = outcome.solve
     assert not any(item.selected for item in accumulator.candidates)
 
     for index, center in enumerate([(0.5, 0.25), (0.25, 0.5)], start=5):
@@ -242,9 +251,10 @@ def test_snapshot_solve_rejects_high_error_selected_outlier(tmp_path) -> None:
 
     accumulator._calibrate = fake_calibrate
 
-    result = accumulator.solve_snapshot(list(accumulator.candidates))
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveOk)
+    result = outcome.solve
 
-    assert result is not None
     assert result.calibration.rms_reprojection_error_px == 0.52
     assert len(result.selected) == 4
     assert result.quality["initialRmsReprojectionErrorPx"] == 2.10
@@ -291,9 +301,10 @@ def test_snapshot_solve_prefers_strong_frames_when_available(tmp_path) -> None:
 
     accumulator._calibrate = fake_calibrate
 
-    result = accumulator.solve_snapshot(list(accumulator.candidates))
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveOk)
+    result = outcome.solve
 
-    assert result is not None
     assert result.quality["acceptedFrames"] == 6
     assert result.quality["solvePoolFrames"] == 4
     assert result.quality["weakSolveFrames"] == 2
@@ -314,3 +325,75 @@ def test_candidate_screenshot_is_written(tmp_path) -> None:
     )
     assert path.exists()
     assert path.suffix == ".jpg"
+
+
+def test_solve_snapshot_returns_insufficient_data_when_too_few_candidates(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD, tmp_path, min_solve_frames=5, create_run_dir=False
+    )
+    outcome = accumulator.solve_snapshot([])
+    assert isinstance(outcome, SolveInsufficientData)
+    assert outcome.reason == "too few candidates"
+    assert outcome.candidate_count == 0
+    assert outcome.needed == 5
+
+
+def test_solve_snapshot_returns_ok_on_successful_solve(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD,
+        tmp_path,
+        min_solve_frames=4,
+        solve_every_new_frames=4,
+        create_run_dir=False,
+    )
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+
+    def fake_calibrate(selected, **_kwargs):
+        return CalibrationResult(
+            rms_reprojection_error_px=0.72,
+            camera_matrix=np.eye(3, dtype=float),
+            distortion_coefficients=np.zeros(5, dtype=float),
+            per_view_errors_px=[0.5 for _ in selected],
+            selected_count=len(selected),
+            flags=0,
+        )
+
+    accumulator._calibrate = fake_calibrate
+    for index, center in enumerate(
+        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
+    ):
+        accumulator.observe(
+            fake_detection(frame_index=index, center_x=center[0], center_y=center[1]),
+            image,
+        )
+
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveOk)
+    assert outcome.solve.calibration.rms_reprojection_error_px == 0.72
+
+
+def test_solve_snapshot_returns_numerical_failure_when_cv2_raises(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD,
+        tmp_path,
+        min_solve_frames=4,
+        solve_every_new_frames=4,
+        create_run_dir=False,
+    )
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+
+    def exploding_calibrate(_selected, **_kwargs):
+        raise cv2.error("rank-deficient input")
+
+    accumulator._calibrate = exploding_calibrate
+    for index, center in enumerate(
+        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
+    ):
+        accumulator.observe(
+            fake_detection(frame_index=index, center_x=center[0], center_y=center[1]),
+            image,
+        )
+
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveNumericalFailure)
+    assert "rank-deficient input" in outcome.reason

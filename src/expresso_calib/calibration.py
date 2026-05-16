@@ -7,7 +7,7 @@ import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal, Union
 
 import cv2
 import numpy as np
@@ -43,6 +43,29 @@ class CalibrationSolveResult:
     quality: dict[str, Any]
     selected: list[CandidateFrame]
     candidate_count: int
+
+
+@dataclass(frozen=True)
+class SolveOk:
+    solve: CalibrationSolveResult
+    kind: Literal["ok"] = "ok"
+
+
+@dataclass(frozen=True)
+class SolveInsufficientData:
+    reason: str
+    candidate_count: int
+    needed: int
+    kind: Literal["insufficient_data"] = "insufficient_data"
+
+
+@dataclass(frozen=True)
+class SolveNumericalFailure:
+    reason: str
+    kind: Literal["numerical_failure"] = "numerical_failure"
+
+
+SolveOutcome = Union[SolveOk, SolveInsufficientData, SolveNumericalFailure]
 
 
 def euclidean(a: Iterable[float], b: Iterable[float]) -> float:
@@ -229,28 +252,40 @@ class CalibrationAccumulator:
         if not force and not self.should_solve():
             return self.last_calibration
 
-        result = self.solve_snapshot(list(self.candidates))
-        if result is None:
-            return self.last_calibration
-        return self.commit_solve_result(result)
+        outcome = self.solve_snapshot(list(self.candidates))
+        if isinstance(outcome, SolveOk):
+            return self.commit_solve_result(outcome.solve)
+        return self.last_calibration
 
-    def solve_snapshot(
-        self, candidates: list[CandidateFrame]
-    ) -> CalibrationSolveResult | None:
+    def solve_snapshot(self, candidates: list[CandidateFrame]) -> SolveOutcome:
         if len(candidates) < self.min_solve_frames:
-            return None
+            return SolveInsufficientData(
+                reason="too few candidates",
+                candidate_count=len(candidates),
+                needed=self.min_solve_frames,
+            )
 
         solve_pool, solve_pool_stats = self._solve_pool(candidates)
         selected = self.select_diverse(
             solve_pool, self.max_calib_frames, mark_selected=False
         )
         if len(selected) < 4:
-            return None
+            return SolveInsufficientData(
+                reason="solve pool too small",
+                candidate_count=len(candidates),
+                needed=max(4, self.min_solve_frames),
+            )
 
-        initial_calibration = self._calibrate(selected, assign_per_view_errors=False)
-        selected, calibration, rejected_outliers, outlier_threshold = (
-            self._refine_outlier_views(selected, initial_calibration)
-        )
+        try:
+            initial_calibration = self._calibrate(selected, assign_per_view_errors=False)
+            selected, calibration, rejected_outliers, outlier_threshold = (
+                self._refine_outlier_views(selected, initial_calibration)
+            )
+        except cv2.error as exc:
+            return SolveNumericalFailure(reason=str(exc))
+        except (ValueError, RuntimeError) as exc:
+            return SolveNumericalFailure(reason=str(exc))
+
         quality = self.summarize_quality(
             selected, calibration, usable_frames=len(solve_pool)
         )
@@ -270,11 +305,13 @@ class CalibrationAccumulator:
             )
             if quality.get("verdict") == "GOOD":
                 quality["verdict"] = "MARGINAL"
-        return CalibrationSolveResult(
-            calibration=calibration,
-            quality=quality,
-            selected=selected,
-            candidate_count=len(candidates),
+        return SolveOk(
+            solve=CalibrationSolveResult(
+                calibration=calibration,
+                quality=quality,
+                selected=selected,
+                candidate_count=len(candidates),
+            )
         )
 
     def _solve_pool(
