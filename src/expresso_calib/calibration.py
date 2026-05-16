@@ -113,6 +113,7 @@ POSE_SCALE_BUCKET_EDGES = (0.04, 0.14)  # area_fraction boundaries: far<0.04<=mi
 K_STABILITY_CONVERGED_PCT = 0.5  # < 0.5% relative span across last 5 solves' fx/fy/cx/cy
 RMS_PLATEAU_RELATIVE_SPREAD = 0.05  # last-5 RMS spread within 5% of median = plateau
 RMS_TREND_LOOKBACK = 5
+MIN_SOLVES_FOR_CONVERGED = 5  # don't declare "converged" before this many solves
 
 
 def compute_cell_occupancy_grid(
@@ -836,6 +837,26 @@ class CalibrationAccumulator:
                 yellow.append("Board scale does not vary much; mix near and far views.")
         if corner_counts and statistics.median(corner_counts) < 18:
             yellow.append("Median ChaRuCo corner count is low; show more of the board.")
+        # Pose diversity is the operator-trust signal: 25 same-pose frames can
+        # otherwise produce GOOD without actually constraining the K matrix.
+        scale_missing = pose_diversity.get("missingScale") or []
+        if scale_missing:
+            yellow.append(
+                f"Missing distance band{'s' if len(scale_missing) > 1 else ''}: "
+                f"{', '.join(scale_missing)}. Show the board at varied distances."
+            )
+        angle_covered = pose_diversity.get("angleBucketsCovered", 0)
+        angle_total = pose_diversity.get("angleBuckets", 1)
+        if angle_covered < angle_total * 0.25:
+            red.append(
+                f"Too few orientations sampled ({angle_covered}/{angle_total}); "
+                "rotate the board more as you move it."
+            )
+        elif angle_covered < angle_total * 0.5:
+            yellow.append(
+                f"Orientation variety is limited ({angle_covered}/{angle_total}); "
+                "add more tilted views."
+            )
 
         verdict = "GOOD"
         if red:
@@ -1051,9 +1072,10 @@ class CalibrationAccumulator:
         k_stability = self._k_stability_pct()
         rms_trend = self._rms_trend()
         k_stable = k_stability is not None and k_stability < K_STABILITY_CONVERGED_PCT
+        enough_solves = len(self.solve_history) >= MIN_SOLVES_FOR_CONVERGED
         if rms_trend == "worsening":
             state = "diverging"
-        elif k_stable and rms_trend == "plateau" and verdict == "GOOD":
+        elif k_stable and rms_trend == "plateau" and verdict == "GOOD" and enough_solves:
             state = "converged"
         elif k_stable and rms_trend == "plateau":
             state = "plateau"

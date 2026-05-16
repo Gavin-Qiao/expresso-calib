@@ -1124,15 +1124,29 @@ def test_convergence_states_progress_through_lifecycle(tmp_path) -> None:
         f"stable K + improving RMS should be 'improving', got {conv}"
     )
 
-    # Stable K, plateau RMS, verdict GOOD -> converged
+    # Stable K, plateau RMS, verdict GOOD, but only 3 solves -> NOT yet converged
+    # (the MIN_SOLVES_FOR_CONVERGED gate trips first, keeping it at "plateau")
     accumulator.solve_history = [
         {"rmsReprojectionErrorPx": 0.50},
         {"rmsReprojectionErrorPx": 0.51},
         {"rmsReprojectionErrorPx": 0.50},
     ]
     conv = accumulator.compute_convergence(verdict="GOOD")
+    assert conv["state"] == "plateau", (
+        f"only 3 solves: 'converged' should require >= MIN_SOLVES_FOR_CONVERGED, got {conv}"
+    )
+
+    # With 5+ solves + stable + plateau + GOOD -> converged
+    accumulator.solve_history = [
+        {"rmsReprojectionErrorPx": 0.50},
+        {"rmsReprojectionErrorPx": 0.51},
+        {"rmsReprojectionErrorPx": 0.50},
+        {"rmsReprojectionErrorPx": 0.50},
+        {"rmsReprojectionErrorPx": 0.51},
+    ]
+    conv = accumulator.compute_convergence(verdict="GOOD")
     assert conv["state"] == "converged", (
-        f"stable + plateau + GOOD should be 'converged', got {conv}"
+        f"5 solves + stable + plateau + GOOD should be 'converged', got {conv}"
     )
 
     # Stable K, plateau RMS, verdict MARGINAL -> plateau
@@ -1205,3 +1219,42 @@ def test_guidance_uses_pose_and_quadrant_signals(tmp_path) -> None:
         f"missing 'near' bucket should produce 'show closer' guidance, got {quality['guidance']}"
     )
     assert "near" in quality["poseDiversity"]["missingScale"]
+
+
+def test_pose_diversity_gaps_demote_verdict_to_marginal(tmp_path) -> None:
+    from expresso_calib.calibration import CandidateFrame
+
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+
+    # 30 frames at the SAME orientation and SAME distance band — coverage
+    # might pass image-cell tests, but the operator has shown only one pose.
+    # Spread cells across the image to avoid cell-occupancy failures.
+    selected = []
+    for i in range(30):
+        cx = 0.10 + (i % 6) * 0.16
+        cy = 0.15 + (i // 6) * 0.16
+        det = fake_detection(frame_index=i + 1, center_x=cx, center_y=cy, area_fraction=0.08)
+        det.charuco_count = 30
+        det.angle_deg = 30.0  # all frames same angle
+        selected.append(
+            CandidateFrame(detection=det, image_bgr=image.copy(), accepted_at=f"2026-01-01T{i:02d}")
+        )
+
+    cal = CalibrationResult(
+        rms_reprojection_error_px=0.55,
+        camera_matrix=np.eye(3, dtype=float),
+        distortion_coefficients=np.zeros(5, dtype=float),
+        per_view_errors_px=[0.5 for _ in selected],
+        selected_count=len(selected),
+        flags=0,
+    )
+    quality = accumulator.summarize_quality(selected, cal)
+
+    diversity = quality["poseDiversity"]
+    assert diversity["angleBucketsCovered"] == 1
+    assert diversity["scaleBucketsCovered"] == 1
+    assert quality["verdict"] != "GOOD", (
+        f"only one orientation + one distance band should not be GOOD; "
+        f"warnings={quality['warnings']}, redFlags={quality['redFlags']}"
+    )
