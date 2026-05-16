@@ -1,41 +1,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Any
 
 
 FOCUS_HOLD_SECONDS = 5.0
-
-
-@dataclass(frozen=True)
-class CameraConfig:
-    id: str
-    label: str
-    url: str
-
-
-class EphemeralCameraRegistry:
-    def __init__(self) -> None:
-        self._next_id = 1
-        self._items: dict[str, CameraConfig] = {}
-
-    def add(self, label: str, url: str) -> CameraConfig:
-        camera_id = f"cam-{self._next_id}"
-        self._next_id += 1
-        config = CameraConfig(
-            id=camera_id,
-            label=clean_label(label, fallback=f"Camera {self._next_id - 1}"),
-            url=url.strip(),
-        )
-        self._items[camera_id] = config
-        return config
-
-    def remove(self, camera_id: str) -> CameraConfig | None:
-        return self._items.pop(camera_id, None)
-
-    def list(self) -> list[CameraConfig]:
-        return list(self._items.values())
 
 
 class FocusTracker:

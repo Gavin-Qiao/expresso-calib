@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from expresso_calib.multi_camera import (
-    EphemeralCameraRegistry,
     FocusTracker,
     slugify_label,
     strongest_detecting_camera_id,
@@ -25,16 +24,6 @@ def camera_payload(
             "sharpness": sharpness,
         },
     }
-
-
-def test_registry_adds_and_removes_named_cameras_ephemerally() -> None:
-    registry = EphemeralCameraRegistry()
-    first = registry.add("Front Left", "http://10.39.86.11:1181/?action=stream")
-    second = registry.add("Rear", "http://10.39.86.12:1181/?action=stream")
-
-    assert [item.label for item in registry.list()] == ["Front Left", "Rear"]
-    assert registry.remove(first.id) == first
-    assert registry.list() == [second]
 
 
 def test_focus_arbitration_chooses_strongest_detection() -> None:

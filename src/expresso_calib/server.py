@@ -1152,61 +1152,6 @@ def create_app() -> FastAPI:
             },
         )
 
-    @app.get("/api/latest-frame.jpg", include_in_schema=False)
-    async def legacy_latest_frame(request: Request) -> Response:
-        camera = _preview_camera(request.app.state.live)
-        if camera is None or not camera.has_fresh_preview(time.time()):
-            return Response(status_code=204)
-        return Response(
-            camera.latest_jpeg,
-            media_type="image/jpeg",
-            headers={"Cache-Control": "no-store"},
-        )
-
-    @app.get("/api/latest-stream.mjpg", include_in_schema=False)
-    async def legacy_latest_stream(request: Request) -> StreamingResponse:
-        async def frames() -> Any:
-            last_camera_id = ""
-            last_generation = -1
-            last_seq = -1
-            boundary = b"--frame\r\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                camera = _preview_camera(request.app.state.live)
-                if camera is None:
-                    await asyncio.sleep(1.0 / PREVIEW_STREAM_FPS)
-                    continue
-                latest = camera.latest_jpeg
-                if latest is not None and (
-                    camera.has_fresh_preview(time.time())
-                    and (
-                        camera.id != last_camera_id
-                        or camera.generation != last_generation
-                        or camera.latest_jpeg_seq != last_seq
-                    )
-                ):
-                    last_camera_id = camera.id
-                    last_generation = camera.generation
-                    last_seq = camera.latest_jpeg_seq
-                    yield (
-                        boundary
-                        + b"Content-Type: image/jpeg\r\n"
-                        + f"Content-Length: {len(latest)}\r\n\r\n".encode("ascii")
-                        + latest
-                        + b"\r\n"
-                    )
-                await asyncio.sleep(1.0 / PREVIEW_STREAM_FPS)
-
-        return StreamingResponse(
-            frames(),
-            media_type="multipart/x-mixed-replace; boundary=frame",
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate",
-                "Pragma": "no-cache",
-            },
-        )
-
     @app.websocket("/ws/metrics")
     async def ws_metrics(websocket: WebSocket) -> None:
         hub = websocket.app.state.live.hub
@@ -1244,19 +1189,8 @@ def _is_self_preview_stream(url: str) -> bool:
     return (
         host in self_hosts
         and port == PORT
-        and (
-            parsed.path.startswith("/api/cameras/")
-            or parsed.path == "/api/latest-stream.mjpg"
-        )
+        and parsed.path.startswith("/api/cameras/")
     )
-
-
-def _preview_camera(live: MultiCameraCalibrationState) -> ManagedCamera | None:
-    if live.focus.focused_camera_id:
-        camera = live.cameras.get(live.focus.focused_camera_id)
-        if camera is not None:
-            return camera
-    return next(iter(live.cameras.values()), None)
 
 
 def local_lan_ip() -> str:
