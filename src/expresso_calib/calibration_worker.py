@@ -238,8 +238,9 @@ class CalibrationWorker:
                     case SolveOk(solve=result):
                         async with self.accumulator.lock:
                             self._commit_solve_result(job, result)
+                            should_resolve = self.accumulator.should_solve()
                         self.last_error = None
-                        if self.accumulator.should_solve():
+                        if should_resolve:
                             self._enqueue_solve_if_due(job.generation, allow_while_running=True)
                     case SolveInsufficientData():
                         pass

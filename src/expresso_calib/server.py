@@ -52,6 +52,9 @@ __all__ = [
     "MjpegCapture",
     "MultiCameraCalibrationState",
     "PREVIEW_STREAM_FPS",
+    "RMS_GOOD_MAX_PX",
+    "RMS_MARGINAL_MAX_PX",
+    "RMS_POOR_P95_MAX_PX",
     "ScreenshotJob",
     "SolveJob",
     "_put_latest",
@@ -779,6 +782,3 @@ def main() -> None:
         host="0.0.0.0",
         port=PORT,
     )
-
-
-app = create_app()

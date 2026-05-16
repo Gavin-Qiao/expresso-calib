@@ -236,7 +236,8 @@ Metrics:
 WS /ws/metrics
 ```
 
-The websocket emits:
+The websocket emits per-camera snapshots (selected fields shown — see
+`ManagedCamera.public_snapshot` for the full set):
 
 ```json
 {
@@ -252,7 +253,23 @@ The websocket emits:
       "detectingCharuco": true,
       "rms": 0.74,
       "rmsDisplay": "0.74",
-      "errorGrade": "good"
+      "errorGrade": "good",
+      "errorColor": "rgb(22, 163, 74)",
+      "rmsThresholds": {
+        "goodMaxPx": 0.80,
+        "marginalMaxPx": 1.20,
+        "poorP95MaxPx": 1.80
+      },
+      "candidateFrames": 42,
+      "selectedFrames": 38,
+      "rejectedFrames": 4,
+      "pipeline": {
+        "captureRunning": true,
+        "previewRunning": true,
+        "detectionRunning": false,
+        "solverRunning": false,
+        "screenshotRunning": false
+      }
     }
   ]
 }
