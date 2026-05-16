@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import cv2
 import numpy as np
 import pytest
@@ -475,3 +477,45 @@ def test_solve_snapshot_returns_numerical_failure_when_cv2_raises(tmp_path) -> N
     outcome = accumulator.solve_snapshot(list(accumulator.candidates))
     assert isinstance(outcome, SolveNumericalFailure)
     assert "rank-deficient input" in outcome.reason
+
+
+def test_export_writes_expected_files(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD,
+        tmp_path,
+        min_solve_frames=4,
+        solve_every_new_frames=4,
+    )
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+
+    def fake_calibrate(selected, **_kwargs):
+        return CalibrationResult(
+            rms_reprojection_error_px=0.72,
+            camera_matrix=np.eye(3, dtype=float),
+            distortion_coefficients=np.zeros(5, dtype=float),
+            per_view_errors_px=[0.5 for _ in selected],
+            selected_count=len(selected),
+            flags=0,
+        )
+
+    accumulator._calibrate = fake_calibrate
+    for index, center in enumerate(
+        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
+    ):
+        accumulator.observe(
+            fake_detection(frame_index=index, center_x=center[0], center_y=center[1]),
+            image,
+        )
+    accumulator.solve_if_due()
+    run_dir = accumulator.export()
+
+    assert (run_dir / "calibration.json").exists()
+    assert (run_dir / "detections.csv").exists()
+    assert (run_dir / "report.md").exists()
+
+    payload = json.loads((run_dir / "calibration.json").read_text())
+    assert payload["calibration"]["rms_reprojection_error_px"] == pytest.approx(0.72)
+    assert "rejected" in payload["selected_frames"][0]
+
+    csv_text = (run_dir / "detections.csv").read_text()
+    assert "rejected" in csv_text.splitlines()[0]
