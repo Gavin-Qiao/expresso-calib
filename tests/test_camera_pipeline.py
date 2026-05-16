@@ -87,6 +87,8 @@ def test_camera_ignores_stale_solve_result(tmp_path) -> None:
         calibration=calibration,
         quality={"usableFrames": len(camera.accumulator.candidates)},
         selected=list(camera.accumulator.candidates),
+        rejected=[],
+        rejected_per_view_errors_px=[],
         candidate_count=len(camera.accumulator.candidates),
     )
     job = SolveJob(

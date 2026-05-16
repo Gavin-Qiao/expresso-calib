@@ -25,6 +25,7 @@ class CandidateFrame:
     image_signature: np.ndarray | None = None
     per_view_error_px: float | None = None
     selected: bool = False
+    rejected: bool = False
 
 
 @dataclass
@@ -42,6 +43,8 @@ class CalibrationSolveResult:
     calibration: CalibrationResult
     quality: dict[str, Any]
     selected: list[CandidateFrame]
+    rejected: list[CandidateFrame]
+    rejected_per_view_errors_px: list[float | None]
     candidate_count: int
 
 
@@ -265,9 +268,13 @@ class CalibrationAccumulator:
 
         try:
             initial_calibration = self._calibrate(selected, assign_per_view_errors=False)
-            selected, calibration, rejected_outliers, outlier_threshold = (
-                self._refine_outlier_views(selected, initial_calibration)
-            )
+            (
+                selected,
+                calibration,
+                rejected,
+                rejected_per_view_errors,
+                outlier_threshold,
+            ) = self._refine_outlier_views(selected, initial_calibration)
         except (cv2.error, ValueError, RuntimeError) as exc:
             return SolveNumericalFailure(reason=str(exc))
 
@@ -279,14 +286,14 @@ class CalibrationAccumulator:
             initial_calibration.rms_reprojection_error_px
         )
         quality["outlierRejection"] = {
-            "rejectedFrames": rejected_outliers,
+            "rejectedFrames": len(rejected),
             "thresholdPx": outlier_threshold,
-            "initialSelectedFrames": len(selected) + rejected_outliers,
+            "initialSelectedFrames": len(selected) + len(rejected),
         }
-        if rejected_outliers:
+        if rejected:
             quality["warnings"].append(
-                f"Excluded {rejected_outliers} high-error selected frame"
-                f"{'' if rejected_outliers == 1 else 's'} before final solve."
+                f"Excluded {len(rejected)} high-error selected frame"
+                f"{'' if len(rejected) == 1 else 's'} before final solve."
             )
             if quality.get("verdict") == "GOOD":
                 quality["verdict"] = "MARGINAL"
@@ -295,6 +302,8 @@ class CalibrationAccumulator:
                 calibration=calibration,
                 quality=quality,
                 selected=selected,
+                rejected=rejected,
+                rejected_per_view_errors_px=rejected_per_view_errors,
                 candidate_count=len(candidates),
             )
         )
@@ -332,14 +341,22 @@ class CalibrationAccumulator:
         consumed_new_frames: int | None = None,
     ) -> CalibrationResult:
         selected_ids = {id(item) for item in result.selected}
-        per_view_by_id = {
+        rejected_ids = {id(item) for item in result.rejected}
+        per_view_selected = {
             id(item): error
             for item, error in zip(result.selected, result.calibration.per_view_errors_px)
         }
+        per_view_rejected = {
+            id(item): error
+            for item, error in zip(result.rejected, result.rejected_per_view_errors_px)
+        }
         for item in self.candidates:
             item.selected = id(item) in selected_ids
-            if item.selected and id(item) in per_view_by_id:
-                item.per_view_error_px = per_view_by_id[id(item)]
+            item.rejected = id(item) in rejected_ids
+            if id(item) in per_view_selected:
+                item.per_view_error_px = per_view_selected[id(item)]
+            elif id(item) in per_view_rejected:
+                item.per_view_error_px = per_view_rejected[id(item)]
 
         calibration = result.calibration
         self.last_calibration = calibration
@@ -372,30 +389,44 @@ class CalibrationAccumulator:
 
     def _refine_outlier_views(
         self, selected: list[CandidateFrame], calibration: CalibrationResult
-    ) -> tuple[list[CandidateFrame], CalibrationResult, int, float | None]:
+    ) -> tuple[
+        list[CandidateFrame],
+        CalibrationResult,
+        list[CandidateFrame],
+        list[float | None],
+        float | None,
+    ]:
         errors = calibration.per_view_errors_px
         if len(selected) < self.min_outlier_refine_frames or len(errors) != len(selected):
-            return selected, calibration, 0, None
+            return selected, calibration, [], [], None
 
         median_error = percentile(errors, 50)
         if median_error is None:
-            return selected, calibration, 0, None
+            return selected, calibration, [], [], None
 
         threshold = max(
             self.outlier_error_floor,
             median_error * self.outlier_error_median_factor,
         )
-        kept = [
-            item
-            for item, error in zip(selected, errors)
-            if float(error) <= threshold
-        ]
+        kept: list[CandidateFrame] = []
+        rejected: list[CandidateFrame] = []
+        for item, error in zip(selected, errors):
+            if float(error) <= threshold:
+                kept.append(item)
+            else:
+                rejected.append(item)
         minimum_kept = max(4, min(self.min_outlier_refine_frames, len(selected)))
-        if len(kept) == len(selected) or len(kept) < minimum_kept:
-            return selected, calibration, 0, threshold
+        if not rejected or len(kept) < minimum_kept:
+            return selected, calibration, [], [], threshold
 
         refined = self._calibrate(kept, assign_per_view_errors=False)
-        return kept, refined, len(selected) - len(kept), threshold
+        rejected_errors = [
+            self._project_per_view_error(
+                item, refined.camera_matrix, refined.distortion_coefficients
+            )
+            for item in rejected
+        ]
+        return kept, refined, rejected, rejected_errors, threshold
 
     def write_candidate_screenshot(
         self, item: CandidateFrame, screenshot_dir: Path
@@ -560,6 +591,35 @@ class CalibrationAccumulator:
             error = np.sqrt(np.mean(np.sum((projected - image_points) ** 2, axis=1)))
             errors.append(float(error))
         return errors
+
+    def _project_per_view_error(
+        self,
+        candidate: CandidateFrame,
+        camera_matrix: np.ndarray,
+        dist_coeffs: np.ndarray,
+    ) -> float | None:
+        detection = candidate.detection
+        if detection.ids is None or detection.corners is None:
+            return None
+        object_corners = board_chessboard_corners(self.board)
+        ids = np.asarray(detection.ids, dtype=np.int32).reshape(-1)
+        object_points = object_corners[ids]
+        image_points = np.asarray(detection.corners, dtype=np.float32).reshape(-1, 2)
+        success, rvec, tvec = cv2.solvePnP(
+            object_points,
+            image_points,
+            camera_matrix,
+            dist_coeffs,
+        )
+        if not success:
+            return None
+        projected, _ = cv2.projectPoints(
+            object_points, rvec, tvec, camera_matrix, dist_coeffs
+        )
+        projected = projected.reshape(-1, 2)
+        return float(
+            np.sqrt(np.mean(np.sum((projected - image_points) ** 2, axis=1)))
+        )
 
     def summarize_quality(
         self,
@@ -799,6 +859,7 @@ class CalibrationAccumulator:
             "center": [detection.center_x, detection.center_y],
             "sharpness": detection.sharpness,
             "accepted_at": item.accepted_at,
+            "rejected": item.rejected,
         }
         if include_selected:
             payload["selected"] = item.selected
@@ -812,6 +873,7 @@ class CalibrationAccumulator:
                     "frame",
                     "time_sec",
                     "selected",
+                    "rejected",
                     "markers",
                     "charuco_corners",
                     "per_view_error_px",
@@ -831,6 +893,7 @@ class CalibrationAccumulator:
                         detection.frame_index,
                         f"{detection.timestamp_sec:.6f}",
                         int(item.selected),
+                        int(item.rejected),
                         detection.marker_count,
                         detection.charuco_count,
                         ""

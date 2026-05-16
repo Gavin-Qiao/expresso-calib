@@ -260,6 +260,86 @@ def test_snapshot_solve_rejects_high_error_selected_outlier(tmp_path) -> None:
     assert result.quality["initialRmsReprojectionErrorPx"] == 2.10
     assert result.quality["outlierRejection"]["rejectedFrames"] == 1
     assert result.quality["verdict"] == "REDO"
+    assert len(result.rejected) == 1
+    assert result.rejected[0].detection.frame_index == 3
+
+
+def test_refine_outliers_marks_rejected_frames_and_rescores_them(tmp_path, monkeypatch) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD,
+        tmp_path,
+        min_solve_frames=5,
+        max_calib_frames=5,
+        min_outlier_refine_frames=4,
+        create_run_dir=False,
+    )
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    for index, center in enumerate(
+        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7), (0.45, 0.45)], start=1
+    ):
+        accepted, _ = accumulator.observe(
+            fake_detection(frame_index=index, center_x=center[0], center_y=center[1]),
+            image,
+        )
+        assert accepted is True
+
+    calibrations = iter(
+        [
+            CalibrationResult(
+                rms_reprojection_error_px=2.10,
+                camera_matrix=np.eye(3, dtype=float),
+                distortion_coefficients=np.zeros(5, dtype=float),
+                per_view_errors_px=[0.45, 0.50, 4.20, 0.55, 0.48],
+                selected_count=5,
+                flags=0,
+            ),
+            CalibrationResult(
+                rms_reprojection_error_px=0.52,
+                camera_matrix=np.eye(3, dtype=float),
+                distortion_coefficients=np.zeros(5, dtype=float),
+                per_view_errors_px=[0.42, 0.48, 0.46, 0.44],
+                selected_count=4,
+                flags=0,
+            ),
+        ]
+    )
+
+    def fake_calibrate(_selected, **_kwargs):
+        return next(calibrations)
+
+    accumulator._calibrate = fake_calibrate
+
+    rescore_calls: list[int] = []
+
+    def fake_rescore(candidate, camera_matrix, dist_coeffs):
+        rescore_calls.append(candidate.detection.frame_index)
+        return 3.75
+
+    monkeypatch.setattr(accumulator, "_project_per_view_error", fake_rescore)
+
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveOk)
+    accumulator.commit_solve_result(outcome.solve)
+
+    rejected = [item for item in accumulator.candidates if item.rejected]
+    kept = [item for item in accumulator.candidates if item.selected]
+    assert len(rejected) == 1
+    assert len(kept) == 4
+    assert rejected[0].detection.frame_index == 3
+    assert rejected[0].per_view_error_px == pytest.approx(3.75)
+    assert rejected[0].selected is False
+    assert rescore_calls == [3]
+    for item in kept:
+        assert item.rejected is False
+
+
+def test_candidate_frame_default_rejected_is_false(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    accumulator.observe(
+        fake_detection(frame_index=1, center_x=0.5, center_y=0.5), image
+    )
+    assert accumulator.candidates[-1].rejected is False
 
 
 def test_snapshot_solve_prefers_strong_frames_when_available(tmp_path) -> None:
