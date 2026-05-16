@@ -101,11 +101,12 @@ elements.heightMm.addEventListener("input", refreshPdfLink);
 elements.fullscreen.addEventListener("click", async () => {
   await saveMetadata();
   document.body.classList.add("target-fullscreen");
+  lastBoardSizeKey = "";
   refreshBoardImage();
 });
 
-window.addEventListener("resize", refreshBoardImage);
-window.addEventListener("orientationchange", () => setTimeout(refreshBoardImage, 250));
+window.addEventListener("resize", scheduleBoardRefresh);
+window.addEventListener("orientationchange", () => setTimeout(scheduleBoardRefresh, 250));
 
 function populateModelSelect() {
   elements.modelSelect.replaceChildren();
@@ -223,10 +224,26 @@ function currentMetadata() {
   };
 }
 
+let pendingResizeId = null;
+let lastBoardSizeKey = "";
+
+function scheduleBoardRefresh() {
+  if (pendingResizeId !== null) {
+    clearTimeout(pendingResizeId);
+  }
+  pendingResizeId = setTimeout(() => {
+    pendingResizeId = null;
+    refreshBoardImage();
+  }, 200);
+}
+
 function refreshBoardImage() {
   const rect = elements.stage.getBoundingClientRect();
   const ratio = window.devicePixelRatio || 1;
   const width = Math.max(900, Math.round(rect.width * ratio));
   const height = Math.max(650, Math.round(rect.height * ratio));
+  const key = `${width}x${height}`;
+  if (key === lastBoardSizeKey) return;
+  lastBoardSizeKey = key;
   elements.image.src = `/api/target.png?w=${width}&h=${height}&ts=${Date.now()}`;
 }

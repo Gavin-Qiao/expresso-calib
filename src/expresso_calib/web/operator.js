@@ -51,18 +51,25 @@ async function addCamera(event) {
   const url = elements.url.value.trim();
   if (!url) return;
 
-  const response = await fetch("/api/cameras", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ label, url })
-  });
-  const payload = await response.json();
-  if (!response.ok || !payload.ok) {
-    flashFormError();
-    return;
+  try {
+    const response = await fetch("/api/cameras", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label, url })
+    });
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (e) {}
+    if (!response.ok || !payload?.ok) {
+      flashFormError(payload?.detail);
+      return;
+    }
+    elements.label.value = "";
+    await refreshCameras();
+  } catch (err) {
+    flashFormError(String(err?.message || err || "Network error"));
   }
-  elements.label.value = "";
-  await refreshCameras();
 }
 
 async function removeCamera(cameraId) {
@@ -108,13 +115,37 @@ async function refreshCameras() {
   render(payload);
 }
 
+let metricsReconnectAttempts = 0;
+const METRICS_RECONNECT_MAX_DELAY_MS = 15000;
+
 function connectMetrics() {
-  state.ws = new WebSocket(wsUrl("/ws/metrics"));
-  state.ws.addEventListener("message", (event) => {
-    render(JSON.parse(event.data));
+  if (state.ws) {
+    try { state.ws.close(); } catch (e) {}
+    state.ws = null;
+  }
+  const ws = new WebSocket(wsUrl("/ws/metrics"));
+  state.ws = ws;
+  ws.addEventListener("open", () => {
+    metricsReconnectAttempts = 0;
   });
-  state.ws.addEventListener("close", () => {
-    setTimeout(connectMetrics, 1000);
+  ws.addEventListener("message", (event) => {
+    if (state.ws === ws) {
+      render(JSON.parse(event.data));
+    }
+  });
+  ws.addEventListener("close", () => {
+    if (state.ws !== ws) return;
+    state.ws = null;
+    metricsReconnectAttempts++;
+    const base = Math.min(
+      METRICS_RECONNECT_MAX_DELAY_MS,
+      1000 * Math.pow(2, Math.min(6, metricsReconnectAttempts))
+    );
+    const jitter = Math.random() * 0.5 + 0.75;
+    setTimeout(connectMetrics, base * jitter);
+  });
+  ws.addEventListener("error", () => {
+    try { ws.close(); } catch (e) {}
   });
 }
 
@@ -188,6 +219,12 @@ function renderCameraGrid(cameras, focusedCameraId) {
 
   for (const [cameraId, tile] of existing.entries()) {
     if (!ids.has(cameraId)) {
+      const image = tile.querySelector(".camera-feed");
+      if (image) {
+        image.removeAttribute("src");
+        image.replaceWith(image.cloneNode(false));
+      }
+      state.streamSrcById.delete(cameraId);
       tile.remove();
     }
   }
@@ -361,7 +398,15 @@ async function fetchJson(url, options) {
   return response.json();
 }
 
-function flashFormError() {
+function flashFormError(detail) {
   elements.form.classList.add("has-error");
   setTimeout(() => elements.form.classList.remove("has-error"), 900);
+  let status = elements.form.querySelector(".camera-form-status");
+  if (!status) {
+    status = document.createElement("small");
+    status.className = "camera-form-status";
+    status.setAttribute("role", "alert");
+    elements.form.appendChild(status);
+  }
+  status.textContent = detail ? String(detail) : "";
 }
