@@ -810,3 +810,246 @@ def test_refinement_downgrade_to_marginal_requires_nontrivial_rejection_rate(
     assert any("Excluded 4" in w for w in high_rate.quality["warnings"])
     rate = len(high_rate.rejected) / (len(high_rate.selected) + len(high_rate.rejected))
     assert rate > 0.10
+
+
+def test_cell_occupancy_replaces_bbox_span_coverage(tmp_path) -> None:
+    from expresso_calib.calibration import CandidateFrame, compute_cell_occupancy
+
+    width, height = 960, 540
+
+    # Single diagonal frame: corners span corner-to-corner. Bbox-span coverage
+    # would report ~100% width AND ~100% height; cell occupancy reports only
+    # the cells actually touched.
+    diagonal_corners = np.array(
+        [[[float(width * t), float(height * t)]] for t in np.linspace(0.05, 0.95, 12)],
+        dtype=np.float32,
+    )
+    diagonal = CandidateFrame(
+        detection=DetectionResult(
+            frame_index=1,
+            timestamp_sec=0.0,
+            width=width,
+            height=height,
+            marker_count=12,
+            charuco_count=12,
+            sharpness=120.0,
+            corners=diagonal_corners,
+            ids=np.arange(12, dtype=np.int32).reshape(-1, 1),
+        ),
+        image_bgr=np.zeros((height, width, 3), dtype=np.uint8),
+        accepted_at="2026-01-01",
+    )
+    occupancy_diagonal = compute_cell_occupancy([diagonal], width, height)
+    assert occupancy_diagonal < 0.30, (
+        f"a single diagonal frame should cover < 30% of cells, got {occupancy_diagonal}"
+    )
+
+    # Many frames each covering a small cluster of cells: high total occupancy.
+    spread = []
+    cluster = 60.0  # ~one cell wide
+    for i, (cx_frac, cy_frac) in enumerate(
+        [
+            (0.10, 0.15),
+            (0.35, 0.15),
+            (0.65, 0.15),
+            (0.90, 0.15),
+            (0.10, 0.50),
+            (0.35, 0.50),
+            (0.65, 0.50),
+            (0.90, 0.50),
+            (0.10, 0.85),
+            (0.35, 0.85),
+            (0.65, 0.85),
+            (0.90, 0.85),
+        ]
+    ):
+        cx_px = width * cx_frac
+        cy_px = height * cy_frac
+        corners = np.array(
+            [
+                [[cx_px - cluster, cy_px - cluster]],
+                [[cx_px + cluster, cy_px - cluster]],
+                [[cx_px - cluster, cy_px + cluster]],
+                [[cx_px + cluster, cy_px + cluster]],
+            ],
+            dtype=np.float32,
+        )
+        spread.append(
+            CandidateFrame(
+                detection=DetectionResult(
+                    frame_index=i + 1,
+                    timestamp_sec=0.0,
+                    width=width,
+                    height=height,
+                    marker_count=4,
+                    charuco_count=4,
+                    sharpness=120.0,
+                    corners=corners,
+                    ids=np.arange(4, dtype=np.int32).reshape(-1, 1),
+                ),
+                image_bgr=np.zeros((height, width, 3), dtype=np.uint8),
+                accepted_at=f"2026-01-01T00:00:{i:02d}",
+            )
+        )
+    occupancy_spread = compute_cell_occupancy(spread, width, height)
+    assert occupancy_spread >= 0.50, (
+        f"12 cluster frames spread across the image should cover >= 50% of cells, "
+        f"got {occupancy_spread}"
+    )
+
+
+def test_summary_uses_cell_occupancy_for_verdict(tmp_path) -> None:
+    from expresso_calib.calibration import CandidateFrame
+
+    width, height = 960, 540
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+
+    diagonal_corners = np.array(
+        [[[float(width * t), float(height * t)]] for t in np.linspace(0.05, 0.95, 16)],
+        dtype=np.float32,
+    )
+    diagonal = CandidateFrame(
+        detection=DetectionResult(
+            frame_index=1,
+            timestamp_sec=0.0,
+            width=width,
+            height=height,
+            marker_count=16,
+            charuco_count=16,
+            sharpness=120.0,
+            corners=diagonal_corners,
+            ids=np.arange(16, dtype=np.int32).reshape(-1, 1),
+        ),
+        image_bgr=np.zeros((height, width, 3), dtype=np.uint8),
+        accepted_at="2026-01-01",
+    )
+    selected = [diagonal] * 25  # enough to clear the frame-count gate
+    cal = CalibrationResult(
+        rms_reprojection_error_px=0.6,
+        camera_matrix=np.eye(3, dtype=float),
+        distortion_coefficients=np.zeros(5, dtype=float),
+        per_view_errors_px=[0.5 for _ in selected],
+        selected_count=len(selected),
+        flags=0,
+    )
+    quality = accumulator.summarize_quality(selected, cal)
+    assert quality["coverage"]["cellOccupancyFraction"] < 0.30
+    assert any("cell coverage" in flag.lower() for flag in quality["redFlags"]), (
+        "diagonal-only frames should fail the cell-occupancy gate"
+    )
+
+
+def test_iterative_refinement_catches_outliers_revealed_by_first_pass(
+    tmp_path,
+) -> None:
+    from expresso_calib.calibration import CandidateFrame
+
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD,
+        tmp_path,
+        min_solve_frames=20,
+        max_calib_frames=20,
+        min_outlier_refine_frames=15,
+        min_outlier_refine_keep=10,
+        create_run_dir=False,
+    )
+
+    candidates = []
+    for i in range(20):
+        cx = 0.08 + (i % 5) * 0.20
+        cy = 0.10 + (i // 5) * 0.20
+        area = 0.06 + (i % 4) * 0.04
+        det = fake_detection(frame_index=i + 1, center_x=cx, center_y=cy, area_fraction=area)
+        det.charuco_count = 30
+        candidates.append(
+            CandidateFrame(
+                detection=det,
+                image_bgr=image.copy(),
+                accepted_at=f"2026-01-01T{i:02d}",
+            )
+        )
+    accumulator.candidates = candidates
+
+    # First pass: one frame at 4.5; second pass (after refinement): a second
+    # frame newly above the refined threshold.
+    pass1 = [0.40] * 20
+    pass1[19] = 4.5
+    pass2 = [0.38] * 19
+    pass2[18] = 3.5
+    pass3 = [0.35] * 18
+
+    calibrations = iter(
+        [
+            CalibrationResult(
+                rms_reprojection_error_px=0.6,
+                camera_matrix=np.eye(3, dtype=float),
+                distortion_coefficients=np.zeros(5, dtype=float),
+                per_view_errors_px=pass1,
+                selected_count=20,
+                flags=0,
+            ),
+            CalibrationResult(
+                rms_reprojection_error_px=0.45,
+                camera_matrix=np.eye(3, dtype=float),
+                distortion_coefficients=np.zeros(5, dtype=float),
+                per_view_errors_px=pass2,
+                selected_count=19,
+                flags=0,
+            ),
+            CalibrationResult(
+                rms_reprojection_error_px=0.40,
+                camera_matrix=np.eye(3, dtype=float),
+                distortion_coefficients=np.zeros(5, dtype=float),
+                per_view_errors_px=pass3,
+                selected_count=18,
+                flags=0,
+            ),
+        ]
+    )
+    accumulator._calibrate = lambda *_a, **_k: next(calibrations)
+    accumulator._project_per_view_error = lambda *_a, **_k: 4.0
+
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveOk)
+    assert len(outcome.solve.rejected) == 2, (
+        "iterative refinement should catch the outlier revealed by the first pass "
+        f"(got {len(outcome.solve.rejected)} rejections)"
+    )
+
+
+def test_select_diverse_prefers_truly_diverse_over_high_quality_near_duplicate(
+    tmp_path,
+) -> None:
+    from expresso_calib.calibration import CandidateFrame
+
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+
+    def build(frame_index: int, cx: float, cy: float, sharpness: float) -> CandidateFrame:
+        det = fake_detection(
+            frame_index=frame_index,
+            center_x=cx,
+            center_y=cy,
+            sharpness=sharpness,
+        )
+        return CandidateFrame(
+            detection=det,
+            image_bgr=image.copy(),
+            accepted_at=f"2026-01-01T{frame_index:02d}",
+        )
+
+    # Seed: two near-duplicate "high-quality" frames at the same pose, plus one
+    # truly diverse "mediocre-quality" frame at the opposite corner.
+    high_quality_a = build(1, 0.25, 0.25, sharpness=2000.0)
+    high_quality_dup = build(2, 0.26, 0.26, sharpness=2000.0)
+    diverse_low_quality = build(3, 0.75, 0.75, sharpness=80.0)
+
+    candidates = [high_quality_a, high_quality_dup, diverse_low_quality]
+    chosen = accumulator.select_diverse(candidates, max_frames=2, mark_selected=False)
+    chosen_ids = {item.detection.frame_index for item in chosen}
+    assert 3 in chosen_ids, (
+        "select_diverse should pick the diverse-but-mediocre frame over the "
+        "high-quality near-duplicate; "
+        f"chosen frame indices: {sorted(chosen_ids)}"
+    )

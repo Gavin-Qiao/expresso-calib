@@ -94,6 +94,35 @@ def signature_distance(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.mean(np.abs(left - right)))
 
 
+COVERAGE_CELLS_X = 8
+COVERAGE_CELLS_Y = 6
+COVERAGE_OCCUPANCY_REDO_BELOW = 0.30
+COVERAGE_OCCUPANCY_MARGINAL_BELOW = 0.50
+MAX_REFINEMENT_PASSES = 3
+
+
+def compute_cell_occupancy(
+    selected: list[CandidateFrame],
+    image_width: int,
+    image_height: int,
+    cells_x: int = COVERAGE_CELLS_X,
+    cells_y: int = COVERAGE_CELLS_Y,
+) -> float:
+    if not selected or image_width <= 0 or image_height <= 0:
+        return 0.0
+    occupied: set[tuple[int, int]] = set()
+    for item in selected:
+        corners = item.detection.corners
+        if corners is None:
+            continue
+        pts = np.asarray(corners, dtype=np.float32).reshape(-1, 2)
+        cell_x = np.clip((pts[:, 0] / image_width * cells_x).astype(int), 0, cells_x - 1)
+        cell_y = np.clip((pts[:, 1] / image_height * cells_y).astype(int), 0, cells_y - 1)
+        for cx, cy in zip(cell_x.tolist(), cell_y.tolist(), strict=False):
+            occupied.add((int(cx), int(cy)))
+    return len(occupied) / (cells_x * cells_y)
+
+
 class CalibrationAccumulator:
     def __init__(
         self,
@@ -407,38 +436,57 @@ class CalibrationAccumulator:
         # bad frames and the threshold balloons above them, suppressing
         # rejection. In the operator workflow that case is already a
         # "redo from scratch" situation that the verdict catches.
-        errors = calibration.per_view_errors_px
-        if len(selected) < self.min_outlier_refine_frames or len(errors) != len(selected):
+        #
+        # Iterates up to MAX_REFINEMENT_PASSES: after refinement the new
+        # model may surface frames that were borderline before. Stops as soon
+        # as a pass finds no new outliers or would leave too few kept frames.
+        if len(selected) < self.min_outlier_refine_frames:
             return selected, calibration, [], [], None
 
-        median_error = percentile(errors, 50)
-        if median_error is None:
-            return selected, calibration, [], [], None
+        current_selected = selected
+        current_calibration = calibration
+        rejected_all: list[CandidateFrame] = []
+        last_threshold: float | None = None
 
-        threshold = max(
-            self.outlier_error_floor,
-            median_error * self.outlier_error_median_factor,
-        )
-        kept: list[CandidateFrame] = []
-        rejected: list[CandidateFrame] = []
-        for item, error in zip(selected, errors, strict=False):
-            if float(error) <= threshold:
-                kept.append(item)
-            else:
-                rejected.append(item)
-        if not rejected:
-            return selected, calibration, [], [], None
-        if len(kept) < self.min_outlier_refine_keep:
-            return selected, calibration, [], [], None
+        for _pass in range(MAX_REFINEMENT_PASSES):
+            errors = current_calibration.per_view_errors_px
+            if len(errors) != len(current_selected):
+                break
+            median_error = percentile(errors, 50)
+            if median_error is None:
+                break
+            threshold = max(
+                self.outlier_error_floor,
+                median_error * self.outlier_error_median_factor,
+            )
+            last_threshold = threshold
+            kept: list[CandidateFrame] = []
+            pass_rejected: list[CandidateFrame] = []
+            for item, error in zip(current_selected, errors, strict=False):
+                if float(error) <= threshold:
+                    kept.append(item)
+                else:
+                    pass_rejected.append(item)
+            if not pass_rejected:
+                break
+            if len(kept) < self.min_outlier_refine_keep:
+                break
+            try:
+                current_calibration = self._calibrate(kept, assign_per_view_errors=False)
+            except (cv2.error, ValueError, RuntimeError):
+                break
+            current_selected = kept
+            rejected_all.extend(pass_rejected)
 
-        refined = self._calibrate(kept, assign_per_view_errors=False)
+        if not rejected_all:
+            return selected, calibration, [], [], None
         rejected_errors = [
             self._project_per_view_error(
-                item, refined.camera_matrix, refined.distortion_coefficients
+                item, current_calibration.camera_matrix, current_calibration.distortion_coefficients
             )
-            for item in rejected
+            for item in rejected_all
         ]
-        return kept, refined, rejected, rejected_errors, threshold
+        return current_selected, current_calibration, rejected_all, rejected_errors, last_threshold
 
     def write_candidate_screenshot(self, item: CandidateFrame, screenshot_dir: Path) -> Path:
         screenshot_dir.mkdir(parents=True, exist_ok=True)
@@ -466,10 +514,17 @@ class CalibrationAccumulator:
                     item.selected = True
             return list(candidates)
 
+        # Normalize sharpness against the best-in-set, not a hardcoded constant.
+        # Different cameras produce wildly different Laplacian-variance scales;
+        # the old 450.0 cap saturated for any camera with naturally crisp focus
+        # and under-represented soft-focus cameras.
+        sharp_cap = max((c.detection.sharpness for c in candidates), default=1.0)
+        sharp_cap = max(sharp_cap, 1.0)
+
         def quality(item: CandidateFrame) -> float:
             detection = item.detection
             corner_score = detection.charuco_count / max(1, self.board_config.charuco_corners)
-            sharp_score = min(1.0, detection.sharpness / 450.0)
+            sharp_score = min(1.0, detection.sharpness / sharp_cap)
             area_score = min(1.0, detection.area_fraction / 0.25)
             edge_score = max(abs(detection.center_x - 0.5), abs(detection.center_y - 0.5))
             return corner_score * 0.55 + sharp_score * 0.12 + area_score * 0.23 + edge_score * 0.10
@@ -479,6 +534,10 @@ class CalibrationAccumulator:
         selected = [first]
         remaining.remove(first)
 
+        # Diversity is primary; quality is a multiplicative tiebreaker. The old
+        # additive `+ quality * 0.18` could swamp tight clusters (where the
+        # diversity term is ~0.05) and pull near-duplicates ahead of truly
+        # diverse-but-mediocre frames.
         while remaining and len(selected) < max_frames:
             next_item = max(
                 remaining,
@@ -490,7 +549,7 @@ class CalibrationAccumulator:
                         )
                         for chosen in selected
                     )
-                    + quality(item) * 0.18
+                    * (1.0 + 0.2 * quality(item))
                 ),
             )
             selected.append(next_item)
@@ -653,6 +712,7 @@ class CalibrationAccumulator:
         )
         coverage_width = float((all_points[:, 0].max() - all_points[:, 0].min()) / width)
         coverage_height = float((all_points[:, 1].max() - all_points[:, 1].min()) / height)
+        cell_occupancy = compute_cell_occupancy(selected, width, height)
         edge_margin = {
             "left": float(all_points[:, 0].min() / width),
             "right": float((width - all_points[:, 0].max()) / width),
@@ -679,10 +739,17 @@ class CalibrationAccumulator:
                 red.append("95th percentile per-view error is high.")
             elif p95 > 1.20:
                 yellow.append("A few selected views have elevated reprojection error.")
-        if coverage_width < 0.45 or coverage_height < 0.32:
-            red.append("Detected corners do not cover enough of the image.")
-        elif coverage_width < 0.62 or coverage_height < 0.45:
-            yellow.append("Image coverage is limited; include more edge and corner views.")
+        if cell_occupancy < COVERAGE_OCCUPANCY_REDO_BELOW:
+            red.append(
+                f"Image cell coverage is too low "
+                f"({cell_occupancy * 100:.0f}%); spread the board across more of the frame."
+            )
+        elif cell_occupancy < COVERAGE_OCCUPANCY_MARGINAL_BELOW:
+            yellow.append(
+                f"Image cell coverage is limited "
+                f"({cell_occupancy * 100:.0f}%); aim for >= "
+                f"{int(COVERAGE_OCCUPANCY_MARGINAL_BELOW * 100)}%."
+            )
         if areas:
             if max(areas) < 0.14:
                 yellow.append("The board never gets very close; include close-up views.")
@@ -717,6 +784,8 @@ class CalibrationAccumulator:
             "coverage": {
                 "widthFraction": coverage_width,
                 "heightFraction": coverage_height,
+                "cellOccupancyFraction": cell_occupancy,
+                "cellGrid": [COVERAGE_CELLS_X, COVERAGE_CELLS_Y],
                 "edgeMarginFraction": edge_margin,
             },
             "boardAreaFraction": {

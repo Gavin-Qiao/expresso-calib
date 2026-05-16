@@ -134,6 +134,9 @@ def write_report_md(payload: dict[str, Any], board_config: BoardConfig, path: Pa
                 f"`{quality.get('coverage', {}).get('widthFraction', 0) * 100:.1f}%`, "
                 f"height "
                 f"`{quality.get('coverage', {}).get('heightFraction', 0) * 100:.1f}%`",
+                f"- Cell occupancy: "
+                f"`{quality.get('coverage', {}).get('cellOccupancyFraction', 0) * 100:.1f}%` "
+                f"({'x'.join(str(n) for n in quality.get('coverage', {}).get('cellGrid', [8, 6]))} grid)",
                 "",
                 "### Camera Matrix",
                 "",
