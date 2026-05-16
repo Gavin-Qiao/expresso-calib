@@ -5,6 +5,7 @@ import json
 import socket
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -154,19 +155,37 @@ def _safe_int(value: Any) -> int | None:
 class MjpegCapture:
     def __init__(self, url: str) -> None:
         self.url = url
+        self.response = None
+        self.buffer = bytearray()
+        self.opened = False
+        self.boundary = None
         request = UrlRequest(
             url,
             headers={"User-Agent": "ExpressoCalib/0.1", "Connection": "close"},
         )
-        self.response = urlopen(request, timeout=CAPTURE_OPEN_TIMEOUT_SEC)
-        self.buffer = bytearray()
+        response = urlopen(request, timeout=CAPTURE_OPEN_TIMEOUT_SEC)
+        try:
+            self.boundary = self._parse_boundary(
+                response.headers.get("Content-Type", "")
+            )
+        except Exception:
+            response.close()
+            raise
+        self.response = response
         self.opened = True
-        self.boundary = self._parse_boundary(
-            self.response.headers.get("Content-Type", "")
-        )
 
     def isOpened(self) -> bool:
         return self.opened
+
+    def release(self) -> None:
+        self.opened = False
+        response = self.response
+        self.response = None
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
 
     def read(self) -> tuple[bool, Any]:
         if self.boundary is not None:
@@ -247,13 +266,6 @@ class MjpegCapture:
     def _decode_jpeg(self, jpeg: bytes) -> tuple[bool, Any]:
         image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
         return (image is not None), image
-
-    def release(self) -> None:
-        self.opened = False
-        try:
-            self.response.close()
-        except Exception:
-            pass
 
     def set(self, *_args: Any) -> bool:
         return False
@@ -835,10 +847,11 @@ class MultiCameraCalibrationState:
         return camera
 
     async def remove_camera(self, camera_id: str) -> bool:
-        camera = self.cameras.pop(camera_id, None)
+        camera = self.cameras.get(camera_id)
         if camera is None:
             return False
         await camera.stop()
+        self.cameras.pop(camera_id, None)
         self.focus.clear_if_removed(set(self.cameras))
         await self.broadcast()
         return True
@@ -942,8 +955,15 @@ def _interpolate_rgb(
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Expresso Calib", version="0.1.0")
-    app.state.live = MultiCameraCalibrationState()
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.live = MultiCameraCalibrationState()
+        try:
+            yield
+        finally:
+            await app.state.live.stop_all()
+
+    app = FastAPI(title="Expresso Calib", version="0.1.0", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
     @app.get("/", include_in_schema=False)

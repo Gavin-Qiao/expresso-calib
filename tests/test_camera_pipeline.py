@@ -158,3 +158,53 @@ async def test_metrics_hub_slow_client_does_not_stall_fast_client() -> None:
     assert elapsed < 0.1, f"broadcast blocked for {elapsed:.3f}s on slow client"
     await asyncio.sleep(0.05)
     assert fast.received == ['{"n": 1}']
+
+
+@pytest.mark.asyncio
+async def test_remove_camera_stops_before_popping(tmp_path) -> None:
+    from expresso_calib.server import MultiCameraCalibrationState
+
+    live = MultiCameraCalibrationState()
+
+    class TrackingCamera:
+        def __init__(self) -> None:
+            self.stopped = False
+            self.id = "cam-1"
+            self.label = "test"
+            self.accumulator = None
+
+        async def stop(self) -> None:
+            assert "cam-1" in live.cameras, (
+                "camera was popped before stop() — broadcasts may still hit a half-torn-down camera"
+            )
+            self.stopped = True
+
+    live.cameras["cam-1"] = TrackingCamera()  # type: ignore[assignment]
+
+    removed = await live.remove_camera("cam-1")
+    assert removed is True
+    assert live.cameras == {}
+
+
+@pytest.mark.asyncio
+async def test_lifespan_stops_all_cameras_on_shutdown() -> None:
+    from expresso_calib.server import create_app
+
+    app = create_app()
+    stopped = asyncio.Event()
+
+    class TrackingCamera:
+        def __init__(self) -> None:
+            self.id = "cam-1"
+            self.label = "test"
+
+        async def stop(self) -> None:
+            stopped.set()
+
+        def public_snapshot(self, _now: float) -> dict:
+            return {"id": self.id, "label": self.label}
+
+    async with app.router.lifespan_context(app):
+        app.state.live.cameras["cam-1"] = TrackingCamera()  # type: ignore[assignment]
+
+    assert stopped.is_set()
