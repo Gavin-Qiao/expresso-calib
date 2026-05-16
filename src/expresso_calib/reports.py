@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 
 
 def build_calibration_payload(
-    accumulator: "CalibrationAccumulator",
-    selected: list["CandidateFrame"],
+    accumulator: CalibrationAccumulator,
+    selected: list[CandidateFrame],
 ) -> dict[str, Any]:
     calibration = accumulator.last_calibration
     payload: dict[str, Any] = {
@@ -28,26 +28,20 @@ def build_calibration_payload(
         "quality": accumulator.last_quality,
         "calibration": None,
         "solve_history": accumulator.solve_history,
-        "selected_frames": [
-            _candidate_json(item, include_selected=True) for item in selected
-        ],
+        "selected_frames": [_candidate_json(item, include_selected=True) for item in selected],
     }
     if calibration is not None:
         payload["calibration"] = {
             "model": "opencv_plumb_bob",
             "rms_reprojection_error_px": calibration.rms_reprojection_error_px,
             "camera_matrix": calibration.camera_matrix.astype(float).tolist(),
-            "distortion_coefficients": calibration.distortion_coefficients.astype(
-                float
-            ).tolist(),
+            "distortion_coefficients": calibration.distortion_coefficients.astype(float).tolist(),
             "flags": calibration.flags,
         }
     return payload
 
 
-def _candidate_json(
-    item: "CandidateFrame", *, include_selected: bool = False
-) -> dict[str, Any]:
+def _candidate_json(item: CandidateFrame, *, include_selected: bool = False) -> dict[str, Any]:
     detection = item.detection
     payload = {
         "frame_index": detection.frame_index,
@@ -70,7 +64,7 @@ def write_calibration_json(payload: dict[str, Any], path: Path) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def write_detections_csv(candidates: list["CandidateFrame"], path: Path) -> None:
+def write_detections_csv(candidates: list[CandidateFrame], path: Path) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(
@@ -101,9 +95,7 @@ def write_detections_csv(candidates: list["CandidateFrame"], path: Path) -> None
                     int(item.rejected),
                     detection.marker_count,
                     detection.charuco_count,
-                    ""
-                    if item.per_view_error_px is None
-                    else f"{item.per_view_error_px:.6f}",
+                    "" if item.per_view_error_px is None else f"{item.per_view_error_px:.6f}",
                     f"{detection.sharpness:.3f}",
                     f"{detection.center_x:.6f}",
                     f"{detection.center_y:.6f}",
@@ -115,9 +107,7 @@ def write_detections_csv(candidates: list["CandidateFrame"], path: Path) -> None
             )
 
 
-def write_report_md(
-    payload: dict[str, Any], board_config: BoardConfig, path: Path
-) -> None:
+def write_report_md(payload: dict[str, Any], board_config: BoardConfig, path: Path) -> None:
     quality = payload.get("quality") or {}
     calibration = payload.get("calibration") or {}
     lines = [
@@ -137,8 +127,7 @@ def write_report_md(
     if calibration:
         lines.extend(
             [
-                f"- RMS reprojection error: "
-                f"`{calibration['rms_reprojection_error_px']:.4f} px`",
+                f"- RMS reprojection error: `{calibration['rms_reprojection_error_px']:.4f} px`",
                 f"- Selected frames: `{quality.get('selectedFrames', 0)}`",
                 f"- Usable frames: `{quality.get('usableFrames', 0)}`",
                 f"- Corner coverage: width "
@@ -187,8 +176,8 @@ def write_report_md(
 
 
 def write_debug_images(
-    accumulator: "CalibrationAccumulator",
-    selected: list["CandidateFrame"],
+    accumulator: CalibrationAccumulator,
+    selected: list[CandidateFrame],
     debug_dir: Path,
 ) -> None:
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -196,11 +185,9 @@ def write_debug_images(
         accumulator.write_candidate_screenshot(item, debug_dir)
 
 
-def export_run(accumulator: "CalibrationAccumulator") -> Path:
+def export_run(accumulator: CalibrationAccumulator) -> Path:
     accumulator.run_dir.mkdir(parents=True, exist_ok=True)
-    selected = accumulator.select_diverse(
-        accumulator.candidates, accumulator.max_calib_frames
-    )
+    selected = accumulator.select_diverse(accumulator.candidates, accumulator.max_calib_frames)
     payload = build_calibration_payload(accumulator, selected)
     write_calibration_json(payload, accumulator.run_dir / "calibration.json")
     write_detections_csv(accumulator.candidates, accumulator.run_dir / "detections.csv")

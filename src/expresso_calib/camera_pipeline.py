@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import deque
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
@@ -44,9 +46,7 @@ class MjpegCapture:
         )
         response = urlopen(request, timeout=CAPTURE_OPEN_TIMEOUT_SEC)
         try:
-            self.boundary = self._parse_boundary(
-                response.headers.get("Content-Type", "")
-            )
+            self.boundary = self._parse_boundary(response.headers.get("Content-Type", ""))
         except Exception:
             response.close()
             raise
@@ -61,10 +61,8 @@ class MjpegCapture:
         response = self.response
         self.response = None
         if response is not None:
-            try:
+            with contextlib.suppress(Exception):
                 response.close()
-            except Exception:
-                pass
 
     def read(self) -> tuple[bool, Any]:
         if self.boundary is not None:
@@ -106,9 +104,7 @@ class MjpegCapture:
                     break
                 key, separator, value = line.partition(b":")
                 if separator:
-                    headers[key.decode("latin1").strip().lower()] = (
-                        value.decode("latin1").strip()
-                    )
+                    headers[key.decode("latin1").strip().lower()] = value.decode("latin1").strip()
 
             content_length = _safe_int(headers.get("content-length"))
             if content_length is None or content_length <= 0:
@@ -237,15 +233,13 @@ class CameraPipeline:
                     asyncio.to_thread(self._open_capture),
                     timeout=CAPTURE_OPEN_TIMEOUT_SEC,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._mark_capture_unavailable("Camera open timed out; reconnecting.")
                 await self._broadcast_now()
                 await asyncio.sleep(CAPTURE_RECONNECT_DELAY_SEC)
                 continue
             except Exception as exc:
-                self._mark_capture_unavailable(
-                    f"Camera open failed: {exc}; reconnecting."
-                )
+                self._mark_capture_unavailable(f"Camera open failed: {exc}; reconnecting.")
                 await self._broadcast_now()
                 await asyncio.sleep(CAPTURE_RECONNECT_DELAY_SEC)
                 continue
@@ -262,16 +256,12 @@ class CameraPipeline:
                             asyncio.to_thread(capture.read),
                             timeout=CAPTURE_READ_TIMEOUT_SEC,
                         )
-                    except asyncio.TimeoutError:
-                        self._mark_capture_unavailable(
-                            "Camera read timed out; reconnecting."
-                        )
+                    except TimeoutError:
+                        self._mark_capture_unavailable("Camera read timed out; reconnecting.")
                         await self._broadcast_now()
                         break
                     except Exception as exc:
-                        self._mark_capture_unavailable(
-                            f"Camera read failed: {exc}; reconnecting."
-                        )
+                        self._mark_capture_unavailable(f"Camera read failed: {exc}; reconnecting.")
                         await self._broadcast_now()
                         break
 
@@ -324,9 +314,8 @@ class CameraPipeline:
 
         if capture is None:
             capture = cv2.VideoCapture(self.url)
-        if capture is not None and capture.isOpened():
-            if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
-                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if capture is not None and capture.isOpened() and hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return capture
 
     async def _preview_loop(self) -> None:

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from .calibration import (
     CalibrationAccumulator,
@@ -176,7 +177,7 @@ class CalibrationWorker:
         while self.running:
             try:
                 job = await asyncio.wait_for(self.detection_queue.get(), timeout=0.20)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
             try:
@@ -221,7 +222,7 @@ class CalibrationWorker:
         while self.running:
             try:
                 job = await asyncio.wait_for(self.solve_queue.get(), timeout=0.20)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
             try:
@@ -230,9 +231,7 @@ class CalibrationWorker:
                 self.solver_running = True
                 async with self.accumulator.lock:
                     snapshot = list(self.accumulator.candidates)
-                outcome = await asyncio.to_thread(
-                    self.accumulator.solve_snapshot, snapshot
-                )
+                outcome = await asyncio.to_thread(self.accumulator.solve_snapshot, snapshot)
                 if job.generation != self.generation:
                     continue
                 match outcome:
@@ -241,9 +240,7 @@ class CalibrationWorker:
                             self._commit_solve_result(job, result)
                         self.last_error = None
                         if self.accumulator.should_solve():
-                            self._enqueue_solve_if_due(
-                                job.generation, allow_while_running=True
-                            )
+                            self._enqueue_solve_if_due(job.generation, allow_while_running=True)
                     case SolveInsufficientData():
                         pass
                     case SolveNumericalFailure(reason=reason):
@@ -257,16 +254,14 @@ class CalibrationWorker:
         while self.running:
             try:
                 job = await asyncio.wait_for(self.screenshot_queue.get(), timeout=0.20)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
             try:
                 if job.generation != self.generation:
                     continue
                 self.screenshot_running = True
-                path = await asyncio.to_thread(
-                    self._write_candidate_screenshot, job.candidate
-                )
+                path = await asyncio.to_thread(self._write_candidate_screenshot, job.candidate)
                 if job.generation == self.generation:
                     self.last_screenshot_path = str(path)
             except Exception as exc:
@@ -276,15 +271,10 @@ class CalibrationWorker:
                 self.screenshot_queue.task_done()
                 await self.broadcast()
 
-    def _enqueue_solve_if_due(
-        self, generation: int, *, allow_while_running: bool = False
-    ) -> bool:
+    def _enqueue_solve_if_due(self, generation: int, *, allow_while_running: bool = False) -> bool:
         if generation != self.generation:
             return False
-        if (
-            self.solver_running
-            and not allow_while_running
-        ) or self.solve_queue.qsize() > 0:
+        if (self.solver_running and not allow_while_running) or self.solve_queue.qsize() > 0:
             return False
         if not self.accumulator.should_solve():
             return False
@@ -300,14 +290,10 @@ class CalibrationWorker:
             return False
         return True
 
-    def _commit_solve_result(
-        self, job: SolveJob, result: CalibrationSolveResult
-    ) -> bool:
+    def _commit_solve_result(self, job: SolveJob, result: CalibrationSolveResult) -> bool:
         if job.generation != self.generation:
             return False
-        self.accumulator.commit_solve_result(
-            result, consumed_new_frames=job.consumed_new_frames
-        )
+        self.accumulator.commit_solve_result(result, consumed_new_frames=job.consumed_new_frames)
         return True
 
     def _write_candidate_screenshot(self, item: CandidateFrame) -> Path:

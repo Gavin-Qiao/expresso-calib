@@ -49,17 +49,23 @@ def test_focus_tracker_holds_then_zooms_out_after_timeout() -> None:
 
 def test_focus_tracker_switches_immediately_to_another_detector() -> None:
     tracker = FocusTracker(hold_seconds=5.0)
-    assert tracker.update(
-        [camera_payload("a", detecting=True, corners=20, area=0.1, sharpness=90)],
-        now=10.0,
-    ) == "a"
-    assert tracker.update(
-        [
-            camera_payload("a", detecting=False, corners=0, area=0, sharpness=10),
-            camera_payload("b", detecting=True, corners=18, area=0.2, sharpness=80),
-        ],
-        now=11.0,
-    ) == "b"
+    assert (
+        tracker.update(
+            [camera_payload("a", detecting=True, corners=20, area=0.1, sharpness=90)],
+            now=10.0,
+        )
+        == "a"
+    )
+    assert (
+        tracker.update(
+            [
+                camera_payload("a", detecting=False, corners=0, area=0, sharpness=10),
+                camera_payload("b", detecting=True, corners=18, area=0.2, sharpness=80),
+            ],
+            now=11.0,
+        )
+        == "b"
+    )
 
 
 def test_slugify_label_is_filesystem_safe() -> None:

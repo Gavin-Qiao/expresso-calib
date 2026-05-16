@@ -141,9 +141,7 @@ class CharucoDetector:
                 sharpness=sharpness,
             )
 
-        charuco_corners, charuco_ids = self._interpolate_charuco(
-            gray, marker_corners, marker_ids
-        )
+        charuco_corners, charuco_ids = self._interpolate_charuco(gray, marker_corners, marker_ids)
         if charuco_corners is None or charuco_ids is None or len(charuco_ids) <= 0:
             return DetectionResult(
                 frame_index=frame.index,

@@ -178,9 +178,7 @@ def test_snapshot_solve_preserves_samples_collected_while_solving(tmp_path) -> N
         )
 
     accumulator._calibrate = fake_calibrate
-    for index, center in enumerate(
-        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
-    ):
+    for index, center in enumerate([(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1):
         accepted, _ = accumulator.observe(
             fake_detection(frame_index=index, center_x=center[0], center_y=center[1]),
             image,
@@ -339,9 +337,7 @@ def test_refine_outliers_marks_rejected_frames_and_rescores_them(tmp_path, monke
 def test_candidate_frame_default_rejected_is_false(tmp_path) -> None:
     accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
     image = np.zeros((540, 960, 3), dtype=np.uint8)
-    accumulator.observe(
-        fake_detection(frame_index=1, center_x=0.5, center_y=0.5), image
-    )
+    accumulator.observe(fake_detection(frame_index=1, center_x=0.5, center_y=0.5), image)
     assert accumulator.candidates[-1].rejected is False
 
 
@@ -372,7 +368,9 @@ def test_snapshot_solve_prefers_strong_frames_when_available(tmp_path) -> None:
         assert accepted is True
 
     def fake_calibrate(selected, **_kwargs):
-        assert all(item.detection.charuco_count >= accumulator.min_solve_corners for item in selected)
+        assert all(
+            item.detection.charuco_count >= accumulator.min_solve_corners for item in selected
+        )
         return CalibrationResult(
             rms_reprojection_error_px=0.62,
             camera_matrix=np.eye(3, dtype=float),
@@ -440,9 +438,7 @@ def test_solve_snapshot_returns_ok_on_successful_solve(tmp_path) -> None:
         )
 
     accumulator._calibrate = fake_calibrate
-    for index, center in enumerate(
-        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
-    ):
+    for index, center in enumerate([(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1):
         accumulator.observe(
             fake_detection(frame_index=index, center_x=center[0], center_y=center[1]),
             image,
@@ -467,9 +463,7 @@ def test_solve_snapshot_returns_numerical_failure_when_cv2_raises(tmp_path) -> N
         raise cv2.error("rank-deficient input")
 
     accumulator._calibrate = exploding_calibrate
-    for index, center in enumerate(
-        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
-    ):
+    for index, center in enumerate([(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1):
         accumulator.observe(
             fake_detection(frame_index=index, center_x=center[0], center_y=center[1]),
             image,
@@ -500,9 +494,7 @@ def test_export_writes_expected_files(tmp_path) -> None:
         )
 
     accumulator._calibrate = fake_calibrate
-    for index, center in enumerate(
-        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
-    ):
+    for index, center in enumerate([(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1):
         accumulator.observe(
             fake_detection(frame_index=index, center_x=center[0], center_y=center[1]),
             image,
@@ -541,9 +533,7 @@ async def test_concurrent_observe_and_commit_does_not_corrupt_candidates(tmp_pat
 
     accumulator._calibrate = fake_calibrate
 
-    for i, (cx, cy) in enumerate(
-        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
-    ):
+    for i, (cx, cy) in enumerate([(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1):
         accumulator.observe(fake_detection(frame_index=i, center_x=cx, center_y=cy), image)
 
     async def keep_observing() -> None:

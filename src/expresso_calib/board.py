@@ -54,9 +54,7 @@ def create_dictionary(name: str) -> Any:
         dictionary_name = "DICT_" + dictionary_name
     if not hasattr(aruco, dictionary_name):
         valid = sorted(item for item in dir(aruco) if item.startswith("DICT_"))
-        raise RuntimeError(
-            f"Unknown ArUco dictionary {name!r}. Examples: {', '.join(valid[:8])}"
-        )
+        raise RuntimeError(f"Unknown ArUco dictionary {name!r}. Examples: {', '.join(valid[:8])}")
     dictionary_id = getattr(aruco, dictionary_name)
     if hasattr(aruco, "getPredefinedDictionary"):
         return aruco.getPredefinedDictionary(dictionary_id)

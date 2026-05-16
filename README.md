@@ -40,6 +40,24 @@ Not implemented:
 - Robot camera discovery.
 - Authentication or remote deployment.
 
+## Trust Model
+
+This app is intended for **local network use only** between an operator laptop,
+the iPad target, and robot cameras on the same trusted LAN. The server has no
+authentication, no TLS, and accepts arbitrary http/https/rtsp camera URLs which
+it fetches from its own network position. A user with operator access to the
+console can:
+
+- Reach any host the server can reach by typing its URL into the camera input
+  (no SSRF filtering by design — the operator is trusted).
+- Trigger the server to download arbitrarily large MJPEG payloads (capped at
+  8 MiB per frame and 64 KiB per JSON request, but still costs CPU).
+
+**Do not expose the operator port (3987) or the MacBook camera bridge port
+(3988) to the public internet.** Bind them to the LAN interface or put them
+behind a VPN. If you need remote access for a co-located robot, use SSH port
+forwarding rather than opening the port.
+
 ## Requirements
 
 - Python 3.11 or newer.

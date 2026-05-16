@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import math
 import statistics
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import cv2
 import numpy as np
@@ -66,7 +67,7 @@ SolveOutcome = SolveOk | SolveInsufficientData | SolveNumericalFailure
 
 
 def euclidean(a: Iterable[float], b: Iterable[float]) -> float:
-    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b, strict=False)))
 
 
 def percentile(values: list[float], pct: float) -> float | None:
@@ -174,9 +175,7 @@ class CalibrationAccumulator:
             run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
-    def observe(
-        self, detection: DetectionResult, image_bgr: np.ndarray
-    ) -> tuple[bool, str]:
+    def observe(self, detection: DetectionResult, image_bgr: np.ndarray) -> tuple[bool, str]:
         self.total_frames_seen += 1
         self.last_detection = detection
 
@@ -197,8 +196,7 @@ class CalibrationAccumulator:
         nearest_pose = None
         if self.candidates:
             nearest_pose = min(
-                euclidean(feature, item.detection.feature_vector())
-                for item in self.candidates
+                euclidean(feature, item.detection.feature_vector()) for item in self.candidates
             )
             if nearest_pose < self.duplicate_pose_distance:
                 reason = "duplicate pose"
@@ -260,9 +258,7 @@ class CalibrationAccumulator:
             return SolveInsufficientData(reason="too few candidates")
 
         solve_pool, solve_pool_stats = self._solve_pool(candidates)
-        selected = self.select_diverse(
-            solve_pool, self.max_calib_frames, mark_selected=False
-        )
+        selected = self.select_diverse(solve_pool, self.max_calib_frames, mark_selected=False)
         if len(selected) < 4:
             return SolveInsufficientData(reason="solve pool too small")
 
@@ -278,13 +274,9 @@ class CalibrationAccumulator:
         except (cv2.error, ValueError, RuntimeError) as exc:
             return SolveNumericalFailure(reason=str(exc))
 
-        quality = self.summarize_quality(
-            selected, calibration, usable_frames=len(solve_pool)
-        )
+        quality = self.summarize_quality(selected, calibration, usable_frames=len(solve_pool))
         quality.update(solve_pool_stats)
-        quality["initialRmsReprojectionErrorPx"] = (
-            initial_calibration.rms_reprojection_error_px
-        )
+        quality["initialRmsReprojectionErrorPx"] = initial_calibration.rms_reprojection_error_px
         quality["outlierRejection"] = {
             "rejectedFrames": len(rejected),
             "thresholdPx": outlier_threshold,
@@ -344,11 +336,15 @@ class CalibrationAccumulator:
         rejected_ids = {id(item) for item in result.rejected}
         per_view_selected = {
             id(item): error
-            for item, error in zip(result.selected, result.calibration.per_view_errors_px)
+            for item, error in zip(
+                result.selected, result.calibration.per_view_errors_px, strict=False
+            )
         }
         per_view_rejected = {
             id(item): error
-            for item, error in zip(result.rejected, result.rejected_per_view_errors_px)
+            for item, error in zip(
+                result.rejected, result.rejected_per_view_errors_px, strict=False
+            )
         }
         for item in self.candidates:
             item.selected = id(item) in selected_ids
@@ -380,9 +376,7 @@ class CalibrationAccumulator:
         if consumed_new_frames is None:
             self.accepted_since_solve = 0
         else:
-            self.accepted_since_solve = max(
-                0, self.accepted_since_solve - consumed_new_frames
-            )
+            self.accepted_since_solve = max(0, self.accepted_since_solve - consumed_new_frames)
         if self.auto_export:
             self.export()
         return calibration
@@ -410,7 +404,7 @@ class CalibrationAccumulator:
         )
         kept: list[CandidateFrame] = []
         rejected: list[CandidateFrame] = []
-        for item, error in zip(selected, errors):
+        for item, error in zip(selected, errors, strict=False):
             if float(error) <= threshold:
                 kept.append(item)
             else:
@@ -428,9 +422,7 @@ class CalibrationAccumulator:
         ]
         return kept, refined, rejected, rejected_errors, threshold
 
-    def write_candidate_screenshot(
-        self, item: CandidateFrame, screenshot_dir: Path
-    ) -> Path:
+    def write_candidate_screenshot(self, item: CandidateFrame, screenshot_dir: Path) -> Path:
         screenshot_dir.mkdir(parents=True, exist_ok=True)
         detection = item.detection
         image = item.image_bgr.copy()
@@ -458,18 +450,11 @@ class CalibrationAccumulator:
 
         def quality(item: CandidateFrame) -> float:
             detection = item.detection
-            corner_score = detection.charuco_count / max(
-                1, self.board_config.charuco_corners
-            )
+            corner_score = detection.charuco_count / max(1, self.board_config.charuco_corners)
             sharp_score = min(1.0, detection.sharpness / 450.0)
             area_score = min(1.0, detection.area_fraction / 0.25)
             edge_score = max(abs(detection.center_x - 0.5), abs(detection.center_y - 0.5))
-            return (
-                corner_score * 0.55
-                + sharp_score * 0.12
-                + area_score * 0.23
-                + edge_score * 0.10
-            )
+            return corner_score * 0.55 + sharp_score * 0.12 + area_score * 0.23 + edge_score * 0.10
 
         remaining = list(candidates)
         first = max(remaining, key=quality)
@@ -479,14 +464,16 @@ class CalibrationAccumulator:
         while remaining and len(selected) < max_frames:
             next_item = max(
                 remaining,
-                key=lambda item: min(
-                    euclidean(
-                        item.detection.feature_vector(),
-                        chosen.detection.feature_vector(),
+                key=lambda item: (
+                    min(
+                        euclidean(
+                            item.detection.feature_vector(),
+                            chosen.detection.feature_vector(),
+                        )
+                        for chosen in selected
                     )
-                    for chosen in selected
-                )
-                + quality(item) * 0.18,
+                    + quality(item) * 0.18
+                ),
             )
             selected.append(next_item)
             remaining.remove(next_item)
@@ -538,7 +525,7 @@ class CalibrationAccumulator:
             if len(flattened) == len(selected):
                 computed_per_view = flattened
         if assign_per_view_errors:
-            for candidate, error in zip(selected, computed_per_view):
+            for candidate, error in zip(selected, computed_per_view, strict=False):
                 candidate.per_view_error_px = error
 
         return CalibrationResult(
@@ -562,9 +549,7 @@ class CalibrationAccumulator:
                 continue
             ids = np.asarray(detection.ids, dtype=np.int32).reshape(-1)
             object_points.append(object_corners[ids].reshape(-1, 1, 3))
-            image_points.append(
-                np.asarray(detection.corners, dtype=np.float32).reshape(-1, 1, 2)
-            )
+            image_points.append(np.asarray(detection.corners, dtype=np.float32).reshape(-1, 1, 2))
         return object_points, image_points
 
     def _compute_per_view_errors(
@@ -577,16 +562,14 @@ class CalibrationAccumulator:
     ) -> list[float]:
         object_corners = board_chessboard_corners(self.board)
         errors: list[float] = []
-        for item, rvec, tvec in zip(selected, rvecs, tvecs):
+        for item, rvec, tvec in zip(selected, rvecs, tvecs, strict=False):
             detection = item.detection
             if detection.ids is None or detection.corners is None:
                 continue
             ids = np.asarray(detection.ids, dtype=np.int32).reshape(-1)
             object_points = object_corners[ids]
             image_points = np.asarray(detection.corners, dtype=np.float32).reshape(-1, 2)
-            projected, _ = cv2.projectPoints(
-                object_points, rvec, tvec, camera_matrix, dist_coeffs
-            )
+            projected, _ = cv2.projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs)
             projected = projected.reshape(-1, 2)
             error = np.sqrt(np.mean(np.sum((projected - image_points) ** 2, axis=1)))
             errors.append(float(error))
@@ -613,13 +596,9 @@ class CalibrationAccumulator:
         )
         if not success:
             return None
-        projected, _ = cv2.projectPoints(
-            object_points, rvec, tvec, camera_matrix, dist_coeffs
-        )
+        projected, _ = cv2.projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs)
         projected = projected.reshape(-1, 2)
-        return float(
-            np.sqrt(np.mean(np.sum((projected - image_points) ** 2, axis=1)))
-        )
+        return float(np.sqrt(np.mean(np.sum((projected - image_points) ** 2, axis=1))))
 
     def summarize_quality(
         self,
@@ -640,9 +619,7 @@ class CalibrationAccumulator:
             axis=0,
         )
         coverage_width = float((all_points[:, 0].max() - all_points[:, 0].min()) / width)
-        coverage_height = float(
-            (all_points[:, 1].max() - all_points[:, 1].min()) / height
-        )
+        coverage_height = float((all_points[:, 1].max() - all_points[:, 1].min()) / height)
         edge_margin = {
             "left": float(all_points[:, 0].min() / width),
             "right": float((width - all_points[:, 0].max()) / width),
@@ -692,14 +669,10 @@ class CalibrationAccumulator:
             "redFlags": red,
             "warnings": yellow,
             "selectedFrames": len(selected),
-            "usableFrames": len(self.candidates)
-            if usable_frames is None
-            else usable_frames,
+            "usableFrames": len(self.candidates) if usable_frames is None else usable_frames,
             "cornerCount": {
                 "min": min(corner_counts) if corner_counts else 0,
-                "median": float(statistics.median(corner_counts))
-                if corner_counts
-                else 0.0,
+                "median": float(statistics.median(corner_counts)) if corner_counts else 0.0,
                 "max": max(corner_counts) if corner_counts else 0,
             },
             "perViewErrorPx": {

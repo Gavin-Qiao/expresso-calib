@@ -68,12 +68,8 @@ def test_camera_ignores_stale_solve_result(tmp_path) -> None:
         "http://example.test/stream.mjpg",
     )
     image = np.zeros((540, 960, 3), dtype=np.uint8)
-    for index, center in enumerate(
-        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1
-    ):
-        accepted, _ = camera.accumulator.observe(
-            fake_detection(index, center[0], center[1]), image
-        )
+    for index, center in enumerate([(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7)], start=1):
+        accepted, _ = camera.accumulator.observe(fake_detection(index, center[0], center[1]), image)
         assert accepted is True
 
     calibration = CalibrationResult(
@@ -115,17 +111,13 @@ def test_camera_can_queue_followup_solve_while_solver_finishes(tmp_path) -> None
     camera.accumulator.solve_every_new_frames = 1
     image = np.zeros((540, 960, 3), dtype=np.uint8)
     for index, center in enumerate([(0.2, 0.2), (0.7, 0.7)], start=1):
-        accepted, _ = camera.accumulator.observe(
-            fake_detection(index, center[0], center[1]), image
-        )
+        accepted, _ = camera.accumulator.observe(fake_detection(index, center[0], center[1]), image)
         assert accepted is True
 
     camera.solver_running = True
 
     assert camera._enqueue_solve_if_due(camera.generation) is False
-    assert camera._enqueue_solve_if_due(
-        camera.generation, allow_while_running=True
-    ) is True
+    assert camera._enqueue_solve_if_due(camera.generation, allow_while_running=True) is True
     assert camera.solve_queue.qsize() == 1
 
 
@@ -212,7 +204,8 @@ async def test_lifespan_stops_all_cameras_on_shutdown() -> None:
 
 def test_oversized_post_body_is_rejected() -> None:
     from fastapi.testclient import TestClient
-    from expresso_calib.server import create_app, MAX_REQUEST_BODY_BYTES
+
+    from expresso_calib.server import MAX_REQUEST_BODY_BYTES, create_app
 
     app = create_app()
     with TestClient(app) as client:
@@ -226,7 +219,7 @@ def test_oversized_post_body_is_rejected() -> None:
 
 
 def test_mjpeg_oversized_content_length_is_dropped() -> None:
-    from expresso_calib.server import MjpegCapture, MJPEG_MAX_FRAME_BYTES
+    from expresso_calib.server import MJPEG_MAX_FRAME_BYTES, MjpegCapture
 
     capture = MjpegCapture.__new__(MjpegCapture)
     capture.url = "fake"
@@ -236,19 +229,19 @@ def test_mjpeg_oversized_content_length_is_dropped() -> None:
 
     class FakeResponse:
         def __init__(self) -> None:
-            self.lines = iter([
-                b"--frame\r\n",
-                f"content-length: {MJPEG_MAX_FRAME_BYTES + 1}\r\n".encode(),
-                b"\r\n",
-            ])
+            self.lines = iter(
+                [
+                    b"--frame\r\n",
+                    f"content-length: {MJPEG_MAX_FRAME_BYTES + 1}\r\n".encode(),
+                    b"\r\n",
+                ]
+            )
 
         def readline(self) -> bytes:
             return next(self.lines, b"")
 
         def read(self, n: int) -> bytes:
-            raise AssertionError(
-                f"read({n}) called for oversized declared content-length"
-            )
+            raise AssertionError(f"read({n}) called for oversized declared content-length")
 
     capture.response = FakeResponse()
     ok, _ = capture._read_multipart_frame()
@@ -257,7 +250,7 @@ def test_mjpeg_oversized_content_length_is_dropped() -> None:
 
 
 def test_public_snapshot_emits_rms_thresholds(tmp_path) -> None:
-    from expresso_calib.server import MultiCameraCalibrationState, RMS_GOOD_MAX_PX
+    from expresso_calib.server import RMS_GOOD_MAX_PX, MultiCameraCalibrationState
 
     live = MultiCameraCalibrationState()
     camera = live.add_camera("test", "http://example.invalid/stream.mjpg")

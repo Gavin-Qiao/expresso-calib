@@ -13,7 +13,13 @@ from urllib.parse import urlparse
 import qrcode
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from .board import DEFAULT_BOARD, target_pdf_bytes, target_png_bytes
@@ -124,7 +130,7 @@ class ManagedCamera:
 
     def __init__(
         self,
-        manager: "MultiCameraCalibrationState",
+        manager: MultiCameraCalibrationState,
         camera_id: str,
         label: str,
         url: str,
@@ -134,9 +140,7 @@ class ManagedCamera:
         self.label = clean_label(label, fallback=camera_id)
         self.url = url
         accumulator = self._new_accumulator(manager.session_dir, manager.target_metadata)
-        screenshot_dir = manager.session_dir / "screenshots" / slugify_label(
-            self.label, self.id
-        )
+        screenshot_dir = manager.session_dir / "screenshots" / slugify_label(self.label, self.id)
         self.pipeline = CameraPipeline(url)
         self.worker = CalibrationWorker(
             accumulator=accumulator,
@@ -249,9 +253,7 @@ class ManagedCamera:
 
     # --- proxy methods used by tests ---
 
-    def _enqueue_solve_if_due(
-        self, generation: int, *, allow_while_running: bool = False
-    ) -> bool:
+    def _enqueue_solve_if_due(self, generation: int, *, allow_while_running: bool = False) -> bool:
         return self.worker._enqueue_solve_if_due(
             generation, allow_while_running=allow_while_running
         )
@@ -273,13 +275,9 @@ class ManagedCamera:
         await self.worker.stop()
         await self.manager.broadcast()
 
-    def reset_calibration(
-        self, session_dir: Path, target_metadata: dict[str, Any]
-    ) -> None:
+    def reset_calibration(self, session_dir: Path, target_metadata: dict[str, Any]) -> None:
         accumulator = self._new_accumulator(session_dir, target_metadata)
-        screenshot_dir = session_dir / "screenshots" / slugify_label(
-            self.label, self.id
-        )
+        screenshot_dir = session_dir / "screenshots" / slugify_label(self.label, self.id)
         self.worker.reset(accumulator=accumulator, screenshot_dir=screenshot_dir)
 
     # --- view helpers ---
@@ -318,9 +316,7 @@ class ManagedCamera:
             if self.accumulator.last_calibration
             else 0
         )
-        detection = (
-            self.latest_detection.to_public_dict() if self.latest_detection else None
-        )
+        detection = self.latest_detection.to_public_dict() if self.latest_detection else None
         return {
             "id": self.id,
             "generation": self.generation,
@@ -349,9 +345,7 @@ class ManagedCamera:
             "acceptedSinceSolve": self.accumulator.accepted_since_solve,
             "duplicatePoseFrames": self.accumulator.duplicate_pose_rejections,
             "duplicateImageFrames": self.accumulator.duplicate_image_rejections,
-            "rejectedFrames": sum(
-                1 for item in self.accumulator.candidates if item.rejected
-            ),
+            "rejectedFrames": sum(1 for item in self.accumulator.candidates if item.rejected),
             "quality": self.accumulator.last_quality,
             "solveHistory": self.accumulator.solve_history[-6:],
             "solveDue": self.accumulator.should_solve(),
@@ -397,9 +391,7 @@ class MultiCameraCalibrationState:
     def add_camera(self, label: str, url: str) -> ManagedCamera:
         clean_url = _clean_camera_url(url)
         if _is_self_preview_stream(clean_url):
-            raise ValueError(
-                "Use the upstream camera stream URL, not this app's preview proxy."
-            )
+            raise ValueError("Use the upstream camera stream URL, not this app's preview proxy.")
         camera_id = f"cam-{self.next_camera_id}"
         self.next_camera_id += 1
         camera = ManagedCamera(self, camera_id, label, clean_url)
@@ -515,8 +507,7 @@ def _interpolate_rgb(
     span = max(1e-9, right[0] - left[0])
     t = (value - left[0]) / span
     return tuple(
-        int(round(left[1][index] + (right[1][index] - left[1][index]) * t))
-        for index in range(3)
+        int(round(left[1][index] + (right[1][index] - left[1][index]) * t)) for index in range(3)
     )
 
 
@@ -537,13 +528,9 @@ def create_app() -> FastAPI:
         if declared is not None:
             try:
                 if int(declared) > MAX_REQUEST_BODY_BYTES:
-                    return JSONResponse(
-                        {"detail": "Request body too large."}, status_code=413
-                    )
+                    return JSONResponse({"detail": "Request body too large."}, status_code=413)
             except ValueError:
-                return JSONResponse(
-                    {"detail": "Invalid Content-Length."}, status_code=400
-                )
+                return JSONResponse({"detail": "Invalid Content-Length."}, status_code=400)
         return await call_next(request)
 
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
@@ -747,11 +734,7 @@ def _is_self_preview_stream(url: str) -> bool:
     host = parsed.hostname or ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     self_hosts = {"127.0.0.1", "localhost", "::1", local_lan_ip()}
-    return (
-        host in self_hosts
-        and port == PORT
-        and parsed.path.startswith("/api/cameras/")
-    )
+    return host in self_hosts and port == PORT and parsed.path.startswith("/api/cameras/")
 
 
 def local_lan_ip() -> str:
