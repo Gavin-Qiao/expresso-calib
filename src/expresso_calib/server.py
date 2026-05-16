@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import socket
 import time
 from contextlib import asynccontextmanager
@@ -55,6 +56,8 @@ __all__ = [
     "RMS_GOOD_MAX_PX",
     "RMS_MARGINAL_MAX_PX",
     "RMS_POOR_P95_MAX_PX",
+    "RMS_REFERENCE_DIAGONAL_PX",
+    "scaled_rms_thresholds",
     "ScreenshotJob",
     "SolveJob",
     "_put_latest",
@@ -320,6 +323,12 @@ class ManagedCamera:
             else 0
         )
         detection = self.latest_detection.to_public_dict() if self.latest_detection else None
+        diagonal_px: float | None = None
+        if self.latest_detection is not None:
+            diagonal_px = math.sqrt(
+                self.latest_detection.width**2 + self.latest_detection.height**2
+            )
+        thresholds = scaled_rms_thresholds(diagonal_px)
         return {
             "id": self.id,
             "generation": self.generation,
@@ -354,13 +363,9 @@ class ManagedCamera:
             "solveDue": self.accumulator.should_solve(),
             "rms": rms,
             "rmsDisplay": "--" if rms is None else f"{rms:.2f}",
-            "errorGrade": rms_grade(rms),
-            "errorColor": rms_color(rms),
-            "rmsThresholds": {
-                "goodMaxPx": RMS_GOOD_MAX_PX,
-                "marginalMaxPx": RMS_MARGINAL_MAX_PX,
-                "poorP95MaxPx": RMS_POOR_P95_MAX_PX,
-            },
+            "errorGrade": rms_grade(rms, thresholds),
+            "errorColor": rms_color(rms, thresholds),
+            "rmsThresholds": thresholds,
             "lastScreenshotPath": self.last_screenshot_path,
             "pipeline": {
                 "captureRunning": _task_running(self.pipeline.capture_task),
@@ -471,25 +476,46 @@ class MultiCameraCalibrationState:
 RMS_GOOD_MAX_PX = 0.80
 RMS_MARGINAL_MAX_PX = 1.20
 RMS_POOR_P95_MAX_PX = 1.80
+# Reference diagonal: 1080p (1920 x 1080) -> sqrt(1920^2 + 1080^2) ~ 2203
+# The published RMS thresholds were tuned for this resolution. For other
+# resolutions we scale linearly: a 4K camera (diag ~4400) gets thresholds
+# 2x looser; a 480p camera (diag ~734) gets them 3x tighter. Reprojection
+# error is in pixel units, which scales with image size for the same
+# real-world geometric error.
+RMS_REFERENCE_DIAGONAL_PX = 2202.91
 
 
-def rms_grade(rms: float | None) -> str:
+def scaled_rms_thresholds(diagonal_px: float | None) -> dict[str, float]:
+    if diagonal_px is None or diagonal_px <= 0:
+        scale = 1.0
+    else:
+        scale = diagonal_px / RMS_REFERENCE_DIAGONAL_PX
+    return {
+        "goodMaxPx": RMS_GOOD_MAX_PX * scale,
+        "marginalMaxPx": RMS_MARGINAL_MAX_PX * scale,
+        "poorP95MaxPx": RMS_POOR_P95_MAX_PX * scale,
+    }
+
+
+def rms_grade(rms: float | None, thresholds: dict[str, float] | None = None) -> str:
     if rms is None:
         return "pending"
-    if rms <= RMS_GOOD_MAX_PX:
+    t = thresholds or scaled_rms_thresholds(None)
+    if rms <= t["goodMaxPx"]:
         return "good"
-    if rms <= RMS_MARGINAL_MAX_PX:
+    if rms <= t["marginalMaxPx"]:
         return "marginal"
     return "poor"
 
 
-def rms_color(rms: float | None) -> str:
+def rms_color(rms: float | None, thresholds: dict[str, float] | None = None) -> str:
     if rms is None:
         return "rgba(255,255,255,0.36)"
+    t = thresholds or scaled_rms_thresholds(None)
     stops = [
-        (RMS_GOOD_MAX_PX, (22, 163, 74)),
-        (RMS_MARGINAL_MAX_PX, (234, 179, 8)),
-        (RMS_POOR_P95_MAX_PX, (220, 38, 38)),
+        (t["goodMaxPx"], (22, 163, 74)),
+        (t["marginalMaxPx"], (234, 179, 8)),
+        (t["poorP95MaxPx"], (220, 38, 38)),
     ]
     if rms <= stops[0][0]:
         rgb = stops[0][1]

@@ -65,6 +65,7 @@ async function addCamera(event) {
       flashFormError(payload?.detail);
       return;
     }
+    clearFormError();
     elements.label.value = "";
     await refreshCameras();
   } catch (err) {
@@ -409,4 +410,10 @@ function flashFormError(detail) {
     elements.form.appendChild(status);
   }
   status.textContent = detail ? String(detail) : "";
+}
+
+function clearFormError() {
+  elements.form.classList.remove("has-error");
+  const status = elements.form.querySelector(".camera-form-status");
+  if (status) status.textContent = "";
 }

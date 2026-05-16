@@ -237,7 +237,10 @@ WS /ws/metrics
 ```
 
 The websocket emits per-camera snapshots (selected fields shown — see
-`ManagedCamera.public_snapshot` for the full set):
+`ManagedCamera.public_snapshot` for the full set). `rmsThresholds` is
+scaled per camera: the published 0.80/1.20/1.80 px defaults are the
+reference at 1080p (diagonal ~2200 px); higher-resolution cameras get
+proportionally looser thresholds, lower-resolution tighter:
 
 ```json
 {
@@ -263,6 +266,13 @@ The websocket emits per-camera snapshots (selected fields shown — see
       "candidateFrames": 42,
       "selectedFrames": 38,
       "rejectedFrames": 4,
+      "quality": {
+        "verdict": "GOOD",
+        "coverage": {
+          "cellOccupancyFraction": 0.83,
+          "cellGrid": [8, 6]
+        }
+      },
       "pipeline": {
         "captureRunning": true,
         "previewRunning": true,

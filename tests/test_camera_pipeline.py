@@ -258,3 +258,23 @@ def test_public_snapshot_emits_rms_thresholds(tmp_path) -> None:
     assert snapshot["rmsThresholds"]["goodMaxPx"] == RMS_GOOD_MAX_PX
     assert snapshot["rmsThresholds"]["marginalMaxPx"] > snapshot["rmsThresholds"]["goodMaxPx"]
     assert snapshot["rmsThresholds"]["poorP95MaxPx"] > snapshot["rmsThresholds"]["marginalMaxPx"]
+
+
+def test_scaled_rms_thresholds_scale_linearly_with_diagonal() -> None:
+    from expresso_calib.server import (
+        RMS_GOOD_MAX_PX,
+        RMS_REFERENCE_DIAGONAL_PX,
+        scaled_rms_thresholds,
+    )
+
+    reference = scaled_rms_thresholds(RMS_REFERENCE_DIAGONAL_PX)
+    assert reference["goodMaxPx"] == RMS_GOOD_MAX_PX
+
+    fourk = scaled_rms_thresholds(RMS_REFERENCE_DIAGONAL_PX * 2.0)
+    assert fourk["goodMaxPx"] == pytest.approx(RMS_GOOD_MAX_PX * 2.0)
+
+    sub_hd = scaled_rms_thresholds(RMS_REFERENCE_DIAGONAL_PX * 0.5)
+    assert sub_hd["goodMaxPx"] == pytest.approx(RMS_GOOD_MAX_PX * 0.5)
+
+    no_camera = scaled_rms_thresholds(None)
+    assert no_camera["goodMaxPx"] == RMS_GOOD_MAX_PX
