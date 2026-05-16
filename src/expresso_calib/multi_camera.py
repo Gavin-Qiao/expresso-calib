@@ -45,12 +45,13 @@ def strongest_detecting_camera_id(cameras: list[dict[str, Any]]) -> str | None:
     return max(detecting, key=detection_score).get("id")
 
 
-def detection_score(camera: dict[str, Any]) -> tuple[int, float, float]:
+def detection_score(camera: dict[str, Any]) -> tuple[int, float, float, str]:
     detection = camera.get("detection") or {}
     return (
         int(detection.get("charucoCount") or 0),
         float(detection.get("areaFraction") or 0.0),
         float(detection.get("sharpness") or 0.0),
+        str(camera.get("id") or ""),
     )
 
 

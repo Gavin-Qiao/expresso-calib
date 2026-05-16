@@ -111,6 +111,8 @@ class CalibrationAccumulator:
         outlier_error_floor: float = 1.25,
         outlier_error_median_factor: float = 2.5,
         min_outlier_refine_frames: int = 12,
+        min_outlier_refine_keep: int | None = None,
+        refinement_marginal_rejection_rate: float = 0.10,
         min_solve_corners: int | None = None,
         min_solve_area_fraction: float = 0.018,
         min_solve_sharpness: float = 25.0,
@@ -131,6 +133,12 @@ class CalibrationAccumulator:
         self.outlier_error_floor = outlier_error_floor
         self.outlier_error_median_factor = outlier_error_median_factor
         self.min_outlier_refine_frames = min_outlier_refine_frames
+        self.min_outlier_refine_keep = (
+            min_outlier_refine_keep
+            if min_outlier_refine_keep is not None
+            else max(4, min_outlier_refine_frames // 2)
+        )
+        self.refinement_marginal_rejection_rate = refinement_marginal_rejection_rate
         self.min_solve_corners = min_solve_corners or max(
             min_corners, int(round(board_config.charuco_corners * 0.45))
         )
@@ -277,17 +285,21 @@ class CalibrationAccumulator:
         quality = self.summarize_quality(selected, calibration, usable_frames=len(solve_pool))
         quality.update(solve_pool_stats)
         quality["initialRmsReprojectionErrorPx"] = initial_calibration.rms_reprojection_error_px
-        quality["outlierRejection"] = {
-            "rejectedFrames": len(rejected),
-            "thresholdPx": outlier_threshold,
-            "initialSelectedFrames": len(selected) + len(rejected),
-        }
+        outlier_rejection: dict[str, Any] = {"rejectedFrames": len(rejected)}
+        if rejected:
+            outlier_rejection["thresholdPx"] = outlier_threshold
+            outlier_rejection["initialSelectedFrames"] = len(selected) + len(rejected)
+        quality["outlierRejection"] = outlier_rejection
         if rejected:
             quality["warnings"].append(
                 f"Excluded {len(rejected)} high-error selected frame"
                 f"{'' if len(rejected) == 1 else 's'} before final solve."
             )
-            if quality.get("verdict") == "GOOD":
+            rejection_rate = len(rejected) / max(1, len(selected) + len(rejected))
+            if (
+                quality.get("verdict") == "GOOD"
+                and rejection_rate > self.refinement_marginal_rejection_rate
+            ):
                 quality["verdict"] = "MARGINAL"
         return SolveOk(
             solve=CalibrationSolveResult(
@@ -390,6 +402,11 @@ class CalibrationAccumulator:
         list[float | None],
         float | None,
     ]:
+        # Threshold = max(floor, median * factor). Works when outliers are a
+        # minority; when outliers dominate (~50%+) the median sits among the
+        # bad frames and the threshold balloons above them, suppressing
+        # rejection. In the operator workflow that case is already a
+        # "redo from scratch" situation that the verdict catches.
         errors = calibration.per_view_errors_px
         if len(selected) < self.min_outlier_refine_frames or len(errors) != len(selected):
             return selected, calibration, [], [], None
@@ -409,9 +426,10 @@ class CalibrationAccumulator:
                 kept.append(item)
             else:
                 rejected.append(item)
-        minimum_kept = max(4, min(self.min_outlier_refine_frames, len(selected)))
-        if not rejected or len(kept) < minimum_kept:
-            return selected, calibration, [], [], threshold
+        if not rejected:
+            return selected, calibration, [], [], None
+        if len(kept) < self.min_outlier_refine_keep:
+            return selected, calibration, [], [], None
 
         refined = self._calibrate(kept, assign_per_view_errors=False)
         rejected_errors = [
@@ -491,6 +509,12 @@ class CalibrationAccumulator:
         *,
         assign_per_view_errors: bool = True,
     ) -> CalibrationResult:
+        for index, item in enumerate(selected):
+            if item.detection.ids is None or item.detection.corners is None:
+                raise ValueError(
+                    f"_calibrate received selected[{index}] with no ids/corners; "
+                    "caller must filter incomplete frames before solving."
+                )
         object_points, image_points = self._calibration_points(selected)
         first = selected[0].detection
         image_size = (first.width, first.height)
@@ -581,6 +605,15 @@ class CalibrationAccumulator:
         camera_matrix: np.ndarray,
         dist_coeffs: np.ndarray,
     ) -> float | None:
+        # Per-view error for an outlier-rejected frame: solve PnP for the best
+        # rvec/tvec given the FINAL intrinsics, then reproject. This is a
+        # lower bound on the joint-fit error the frame would have shown if it
+        # were still in the solver pool — the joint solve constrains all
+        # rvec/tvec to share K, while PnP gets to pick the best pose per frame.
+        # Kept-frame errors (in `result.calibration.per_view_errors_px`) come
+        # from the joint solve and are not directly comparable; treat the
+        # rejected error as "what's the smallest residual we can achieve for
+        # this frame against the shipped model?"
         detection = candidate.detection
         if detection.ids is None or detection.corners is None:
             return None
@@ -653,7 +686,8 @@ class CalibrationAccumulator:
         if areas:
             if max(areas) < 0.14:
                 yellow.append("The board never gets very close; include close-up views.")
-            if max(areas) - min(areas) < 0.10:
+            area_ratio = max(areas) / max(min(areas), 1e-9)
+            if area_ratio < 1.8:
                 yellow.append("Board scale does not vary much; mix near and far views.")
         if corner_counts and statistics.median(corner_counts) < 18:
             yellow.append("Median ChaRuCo corner count is low; show more of the board.")

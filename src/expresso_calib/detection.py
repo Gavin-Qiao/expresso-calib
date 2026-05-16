@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,13 +54,15 @@ class DetectionResult:
         return self.charuco_count >= 12
 
     def feature_vector(self) -> list[float]:
+        angle_rad = (self.angle_deg % 180.0) * math.pi / 180.0
         return [
             self.center_x,
             self.center_y,
             min(1.0, self.area_fraction * 5.0),
             self.bbox_width,
             self.bbox_height,
-            (self.angle_deg % 180.0) / 180.0,
+            (math.cos(2.0 * angle_rad) + 1.0) / 2.0,
+            (math.sin(2.0 * angle_rad) + 1.0) / 2.0,
             min(1.0, self.charuco_count / 40.0),
         ]
 

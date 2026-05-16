@@ -70,3 +70,13 @@ def test_focus_tracker_switches_immediately_to_another_detector() -> None:
 
 def test_slugify_label_is_filesystem_safe() -> None:
     assert slugify_label("Front Left / Tag 1", "cam-1") == "Front-Left-Tag-1"
+
+
+def test_focus_arbitration_is_stable_on_identical_metrics() -> None:
+    cameras = [
+        camera_payload("cam-b", detecting=True, corners=24, area=0.10, sharpness=80),
+        camera_payload("cam-a", detecting=True, corners=24, area=0.10, sharpness=80),
+    ]
+    first = strongest_detecting_camera_id(cameras)
+    second = strongest_detecting_camera_id(list(reversed(cameras)))
+    assert first == second

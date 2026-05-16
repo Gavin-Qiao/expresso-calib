@@ -561,3 +561,252 @@ async def test_concurrent_observe_and_commit_does_not_corrupt_candidates(tmp_pat
     assert selected <= len(accumulator.candidates)
     for item in accumulator.candidates:
         assert item.per_view_error_px is None or isinstance(item.per_view_error_px, float)
+
+
+def test_calibrate_raises_loudly_on_frames_missing_corners(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+    detection = fake_detection(frame_index=1, center_x=0.5, center_y=0.5)
+    detection.ids = None
+    detection.corners = None
+    from expresso_calib.calibration import CandidateFrame
+
+    bad_item = CandidateFrame(
+        detection=detection,
+        image_bgr=np.zeros((540, 960, 3), dtype=np.uint8),
+        accepted_at="2026-01-01",
+    )
+
+    with pytest.raises(ValueError, match="no ids/corners"):
+        accumulator._calibrate([bad_item])
+
+
+def test_refinement_runs_when_exactly_min_outlier_refine_frames_selected(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD,
+        tmp_path,
+        min_solve_frames=6,
+        max_calib_frames=6,
+        min_outlier_refine_frames=6,
+        create_run_dir=False,
+    )
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    for index, (cx, cy) in enumerate(
+        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7), (0.4, 0.45), (0.55, 0.55)],
+        start=1,
+    ):
+        accepted, _ = accumulator.observe(
+            fake_detection(frame_index=index, center_x=cx, center_y=cy), image
+        )
+        assert accepted is True
+
+    calibrations = iter(
+        [
+            CalibrationResult(
+                rms_reprojection_error_px=2.0,
+                camera_matrix=np.eye(3, dtype=float),
+                distortion_coefficients=np.zeros(5, dtype=float),
+                per_view_errors_px=[0.45, 0.50, 0.55, 4.20, 0.48, 0.46],
+                selected_count=6,
+                flags=0,
+            ),
+            CalibrationResult(
+                rms_reprojection_error_px=0.50,
+                camera_matrix=np.eye(3, dtype=float),
+                distortion_coefficients=np.zeros(5, dtype=float),
+                per_view_errors_px=[0.42, 0.48, 0.50, 0.45, 0.44],
+                selected_count=5,
+                flags=0,
+            ),
+        ]
+    )
+
+    def fake_calibrate(_selected, **_kwargs):
+        return next(calibrations)
+
+    accumulator._calibrate = fake_calibrate
+    accumulator._project_per_view_error = lambda _c, _k, _d: 3.5
+
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveOk)
+    assert len(outcome.solve.rejected) == 1, (
+        "refinement should have executed and rejected the high-error frame; "
+        "the old minimum_kept formula would dead-zone here"
+    )
+
+
+def test_quality_warns_on_low_area_variance_by_ratio_not_absolute_diff(tmp_path) -> None:
+    from expresso_calib.calibration import CandidateFrame
+
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+
+    def candidate_with_area(index: int, area: float, cx: float, cy: float) -> CandidateFrame:
+        return CandidateFrame(
+            detection=fake_detection(
+                frame_index=index, center_x=cx, center_y=cy, area_fraction=area
+            ),
+            image_bgr=image.copy(),
+            accepted_at=f"2026-01-01T00:00:{index:02d}",
+        )
+
+    # Wide ratio: max/min = 0.13/0.05 = 2.6, but abs diff = 0.08 (< 0.10).
+    # Old check would warn; new ratio check (< 1.8) should NOT warn.
+    wide_ratio = [
+        candidate_with_area(1, 0.05, 0.2, 0.2),
+        candidate_with_area(2, 0.07, 0.7, 0.2),
+        candidate_with_area(3, 0.10, 0.2, 0.7),
+        candidate_with_area(4, 0.12, 0.7, 0.7),
+        candidate_with_area(5, 0.13, 0.45, 0.45),
+    ]
+    cal = CalibrationResult(
+        rms_reprojection_error_px=0.5,
+        camera_matrix=np.eye(3, dtype=float),
+        distortion_coefficients=np.zeros(5, dtype=float),
+        per_view_errors_px=[0.4 for _ in wide_ratio],
+        selected_count=len(wide_ratio),
+        flags=0,
+    )
+    quality_wide = accumulator.summarize_quality(wide_ratio, cal)
+    assert not any("scale does not vary" in w.lower() for w in quality_wide["warnings"]), (
+        f"areas {[c.detection.area_fraction for c in wide_ratio]} have ratio 2.6 — "
+        "ratio check should not warn even though abs diff is only 0.08"
+    )
+
+    # Narrow ratio: max/min = 0.30/0.20 = 1.5, abs diff = 0.10.
+    # Old check would NOT warn (abs diff == 0.10, not < 0.10); new ratio check SHOULD warn.
+    narrow_ratio = [
+        candidate_with_area(1, 0.20, 0.2, 0.2),
+        candidate_with_area(2, 0.22, 0.7, 0.2),
+        candidate_with_area(3, 0.28, 0.2, 0.7),
+        candidate_with_area(4, 0.30, 0.7, 0.7),
+        candidate_with_area(5, 0.24, 0.45, 0.45),
+    ]
+    quality_narrow = accumulator.summarize_quality(narrow_ratio, cal)
+    assert any("scale does not vary" in w.lower() for w in quality_narrow["warnings"]), (
+        f"areas {[c.detection.area_fraction for c in narrow_ratio]} have ratio 1.5 — "
+        "ratio check should warn even though abs diff is 0.10"
+    )
+
+
+def test_refinement_outlier_rejection_only_reports_threshold_when_applied(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(
+        DEFAULT_BOARD,
+        tmp_path,
+        min_solve_frames=5,
+        max_calib_frames=5,
+        min_outlier_refine_frames=4,
+        create_run_dir=False,
+    )
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    for index, (cx, cy) in enumerate(
+        [(0.2, 0.2), (0.7, 0.2), (0.2, 0.7), (0.7, 0.7), (0.45, 0.45)], start=1
+    ):
+        accumulator.observe(fake_detection(frame_index=index, center_x=cx, center_y=cy), image)
+
+    def fake_calibrate_clean(_selected, **_kwargs):
+        return CalibrationResult(
+            rms_reprojection_error_px=0.55,
+            camera_matrix=np.eye(3, dtype=float),
+            distortion_coefficients=np.zeros(5, dtype=float),
+            per_view_errors_px=[0.45, 0.50, 0.55, 0.48, 0.46],
+            selected_count=5,
+            flags=0,
+        )
+
+    accumulator._calibrate = fake_calibrate_clean
+    outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+    assert isinstance(outcome, SolveOk)
+    outlier = outcome.solve.quality["outlierRejection"]
+    assert outlier["rejectedFrames"] == 0
+    assert "thresholdPx" not in outlier, (
+        "thresholdPx should be omitted when no frames were rejected; "
+        "consumers should not see a threshold for a refinement that didn't apply"
+    )
+
+
+def test_refinement_downgrade_to_marginal_requires_nontrivial_rejection_rate(
+    tmp_path,
+) -> None:
+    from expresso_calib.calibration import CandidateFrame
+
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+
+    def build_candidates(n: int) -> list[CandidateFrame]:
+        items: list[CandidateFrame] = []
+        for i in range(n):
+            cx = 0.08 + (i % 6) * 0.15
+            cy = 0.10 + (i // 6) * 0.18
+            area = 0.05 + (i % 4) * 0.05
+            det = fake_detection(frame_index=i + 1, center_x=cx, center_y=cy, area_fraction=area)
+            det.charuco_count = 30
+            items.append(
+                CandidateFrame(
+                    detection=det,
+                    image_bgr=image.copy(),
+                    accepted_at=f"2026-01-01T{i:02d}",
+                )
+            )
+        return items
+
+    def fake_calibrations(rejection_count: int, total: int):
+        initial_errors = [0.40 for _ in range(total)]
+        for k in range(rejection_count):
+            initial_errors[-(k + 1)] = 4.5
+        initial = CalibrationResult(
+            rms_reprojection_error_px=0.50,
+            camera_matrix=np.eye(3, dtype=float),
+            distortion_coefficients=np.zeros(5, dtype=float),
+            per_view_errors_px=initial_errors,
+            selected_count=total,
+            flags=0,
+        )
+        kept = total - rejection_count
+        refined = CalibrationResult(
+            rms_reprojection_error_px=0.45,
+            camera_matrix=np.eye(3, dtype=float),
+            distortion_coefficients=np.zeros(5, dtype=float),
+            per_view_errors_px=[0.40 for _ in range(kept)],
+            selected_count=kept,
+            flags=0,
+        )
+        return iter([initial, refined])
+
+    def run_solve(candidate_count: int, rejection_count: int):
+        accumulator = CalibrationAccumulator(
+            DEFAULT_BOARD,
+            tmp_path,
+            min_solve_frames=candidate_count,
+            max_calib_frames=candidate_count,
+            min_outlier_refine_frames=max(4, candidate_count // 2),
+            min_outlier_refine_keep=4,
+            create_run_dir=False,
+        )
+        accumulator.candidates = build_candidates(candidate_count)
+        cals = fake_calibrations(rejection_count, candidate_count)
+        accumulator._calibrate = lambda *_a, **_k: next(cals)
+        accumulator._project_per_view_error = lambda *_a, **_k: 4.5
+        outcome = accumulator.solve_snapshot(list(accumulator.candidates))
+        assert isinstance(outcome, SolveOk)
+        return outcome.solve
+
+    # 1 rejection out of 30 = 3% — under 10% threshold, no downgrade.
+    low_rate = run_solve(30, 1)
+    assert len(low_rate.rejected) == 1
+    assert any("Excluded 1" in w for w in low_rate.quality["warnings"])
+    assert low_rate.quality["verdict"] != "MARGINAL" or any(
+        marker
+        in " ".join(low_rate.quality.get("redFlags", []) + low_rate.quality.get("warnings", []))
+        for marker in ("coverage", "RMS", "P95", "scale", "corners")
+    ), (
+        "1/30 rejection is below the 10% threshold; if verdict is MARGINAL it must be "
+        "from another criterion, not the refinement-downgrade rule"
+    )
+
+    # 4 rejections out of 30 = 13% — above 10% threshold; refinement-downgrade applies.
+    # (We avoid 50% outliers here because the median-based threshold formula breaks down
+    # when outliers dominate the distribution — see the docstring on _refine_outlier_views.)
+    high_rate = run_solve(30, 4)
+    assert len(high_rate.rejected) == 4
+    assert any("Excluded 4" in w for w in high_rate.quality["warnings"])
+    rate = len(high_rate.rejected) / (len(high_rate.selected) + len(high_rate.rejected))
+    assert rate > 0.10
