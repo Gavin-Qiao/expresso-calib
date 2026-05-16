@@ -254,3 +254,14 @@ def test_mjpeg_oversized_content_length_is_dropped() -> None:
     ok, _ = capture._read_multipart_frame()
     assert ok is False
     assert capture.opened is False
+
+
+def test_public_snapshot_emits_rms_thresholds(tmp_path) -> None:
+    from expresso_calib.server import MultiCameraCalibrationState, RMS_GOOD_MAX_PX
+
+    live = MultiCameraCalibrationState()
+    camera = live.add_camera("test", "http://example.invalid/stream.mjpg")
+    snapshot = camera.public_snapshot(now=0.0)
+    assert snapshot["rmsThresholds"]["goodMaxPx"] == RMS_GOOD_MAX_PX
+    assert snapshot["rmsThresholds"]["marginalMaxPx"] > snapshot["rmsThresholds"]["goodMaxPx"]
+    assert snapshot["rmsThresholds"]["poorP95MaxPx"] > snapshot["rmsThresholds"]["marginalMaxPx"]

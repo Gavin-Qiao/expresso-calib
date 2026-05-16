@@ -214,9 +214,9 @@ function updateTile(tile, camera, focusedCameraId) {
   const detection = camera.detection || {};
   const charucoCount = Number(detection.charucoCount || 0);
   const markerCount = Number(detection.markerCount || 0);
-  const minCorners = Number(camera.minCandidateCorners || 12);
+  const minCorners = camera.minCandidateCorners ?? 12;
   const hasCurrentTarget = charucoCount > 0;
-  const score = hasCurrentTarget ? accuracyScore(camera.rms) : null;
+  const score = hasCurrentTarget ? accuracyScore(camera.rms, camera.rmsThresholds) : null;
   const grade = hasCurrentTarget ? camera.errorGrade || "pending" : "pending";
   const color = hasCurrentTarget
     ? camera.errorColor || "rgba(255,255,255,0.42)"
@@ -253,12 +253,12 @@ function updateTile(tile, camera, focusedCameraId) {
   tile.classList.toggle("accuracy-pending", grade === "pending");
 }
 
-function accuracyScore(rms) {
+function accuracyScore(rms, thresholds) {
   const value = Number(rms);
   if (!Number.isFinite(value)) return null;
-  const perfectError = 0.6;
-  const poorError = 1.8;
-  const score = ((poorError - value) / (poorError - perfectError)) * 100;
+  const perfect = thresholds?.goodMaxPx ?? 0.80;
+  const poor = thresholds?.marginalMaxPx ?? 1.20;
+  const score = ((poor - value) / (poor - perfect)) * 100;
   return Math.round(Math.max(0, Math.min(100, score)));
 }
 
@@ -266,7 +266,7 @@ function framesUsedText(camera) {
   const used = Number(camera.calculationFrames || camera.selectedFrames || 0);
   const accepted = Number(camera.candidateFrames || 0);
   const ready = Number(camera.solvePoolFrames || accepted);
-  const minSolve = Number(camera.minSolveFrames || 15);
+  const minSolve = camera.minSolveFrames ?? 15;
   if (used > 0) {
     if (ready !== accepted) {
       return `${used}/${ready} solve-ready, ${accepted} accepted`;

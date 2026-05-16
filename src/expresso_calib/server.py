@@ -359,6 +359,11 @@ class ManagedCamera:
             "rmsDisplay": "--" if rms is None else f"{rms:.2f}",
             "errorGrade": rms_grade(rms),
             "errorColor": rms_color(rms),
+            "rmsThresholds": {
+                "goodMaxPx": RMS_GOOD_MAX_PX,
+                "marginalMaxPx": RMS_MARGINAL_MAX_PX,
+                "poorP95MaxPx": RMS_POOR_P95_MAX_PX,
+            },
             "lastScreenshotPath": self.last_screenshot_path,
             "pipeline": {
                 "captureRunning": _task_running(self.pipeline.capture_task),
@@ -468,12 +473,17 @@ class MultiCameraCalibrationState:
         }
 
 
+RMS_GOOD_MAX_PX = 0.80
+RMS_MARGINAL_MAX_PX = 1.20
+RMS_POOR_P95_MAX_PX = 1.80
+
+
 def rms_grade(rms: float | None) -> str:
     if rms is None:
         return "pending"
-    if rms <= 0.80:
+    if rms <= RMS_GOOD_MAX_PX:
         return "good"
-    if rms <= 1.20:
+    if rms <= RMS_MARGINAL_MAX_PX:
         return "marginal"
     return "poor"
 
@@ -482,9 +492,9 @@ def rms_color(rms: float | None) -> str:
     if rms is None:
         return "rgba(255,255,255,0.36)"
     stops = [
-        (0.80, (22, 163, 74)),
-        (1.20, (234, 179, 8)),
-        (1.80, (220, 38, 38)),
+        (RMS_GOOD_MAX_PX, (22, 163, 74)),
+        (RMS_MARGINAL_MAX_PX, (234, 179, 8)),
+        (RMS_POOR_P95_MAX_PX, (220, 38, 38)),
     ]
     if rms <= stops[0][0]:
         rgb = stops[0][1]
