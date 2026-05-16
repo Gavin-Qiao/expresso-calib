@@ -13,10 +13,10 @@ if TYPE_CHECKING:
     from .calibration import CalibrationAccumulator, CandidateFrame
 
 
-def build_calibration_payload(accumulator: "CalibrationAccumulator") -> dict[str, Any]:
-    selected = accumulator.select_diverse(
-        accumulator.candidates, accumulator.max_calib_frames
-    )
+def build_calibration_payload(
+    accumulator: "CalibrationAccumulator",
+    selected: list["CandidateFrame"],
+) -> dict[str, Any]:
     calibration = accumulator.last_calibration
     payload: dict[str, Any] = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -201,7 +201,7 @@ def export_run(accumulator: "CalibrationAccumulator") -> Path:
     selected = accumulator.select_diverse(
         accumulator.candidates, accumulator.max_calib_frames
     )
-    payload = build_calibration_payload(accumulator)
+    payload = build_calibration_payload(accumulator, selected)
     write_calibration_json(payload, accumulator.run_dir / "calibration.json")
     write_detections_csv(accumulator.candidates, accumulator.run_dir / "detections.csv")
     write_report_md(payload, accumulator.board_config, accumulator.run_dir / "report.md")
