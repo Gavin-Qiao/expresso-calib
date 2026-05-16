@@ -278,3 +278,56 @@ def test_scaled_rms_thresholds_scale_linearly_with_diagonal() -> None:
 
     no_camera = scaled_rms_thresholds(None)
     assert no_camera["goodMaxPx"] == RMS_GOOD_MAX_PX
+
+
+def test_device_url_scheme_accepted_and_normalized() -> None:
+    from expresso_calib.server import _clean_camera_url
+
+    assert _clean_camera_url("device://0") == "device://0"
+    assert _clean_camera_url("device://1") == "device://1"
+    assert _clean_camera_url("  device://2  ") == "device://2"
+
+
+def test_device_url_scheme_rejects_non_integer() -> None:
+    from expresso_calib.server import _clean_camera_url
+
+    with pytest.raises(ValueError):
+        _clean_camera_url("device://foo")
+
+
+def test_export_endpoint_returns_409_before_first_solve(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from expresso_calib.server import create_app
+
+    app = create_app()
+    with TestClient(app) as client:
+        add = client.post(
+            "/api/cameras",
+            json={"label": "smoke", "url": "http://example.invalid/stream.mjpg"},
+        )
+        assert add.status_code == 200, add.text
+        camera_id = add.json()["camera"]["id"]
+        resp = client.post(f"/api/cameras/{camera_id}/export")
+        assert resp.status_code == 409
+        assert "solve" in resp.json()["detail"].lower()
+
+
+def test_export_all_endpoint_reports_skipped_cameras(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from expresso_calib.server import create_app
+
+    app = create_app()
+    with TestClient(app) as client:
+        client.post(
+            "/api/cameras",
+            json={"label": "smoke", "url": "http://example.invalid/stream.mjpg"},
+        )
+        resp = client.post("/api/cameras/export-all")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        results = body["results"]
+        assert len(results) >= 1
+        assert all(r["ok"] is False and "no solve" in r["detail"] for r in results)

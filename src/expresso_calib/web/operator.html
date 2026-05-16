@@ -14,11 +14,13 @@
         </div>
         <form id="cameraForm" class="camera-form">
           <input id="cameraLabel" type="text" autocomplete="off" placeholder="Camera name" />
-          <input id="cameraUrl" type="url" autocomplete="off" spellcheck="false" placeholder="Camera stream URL" />
+          <input id="cameraUrl" type="text" autocomplete="off" spellcheck="false" placeholder="Camera URL or device://0" />
+          <button id="useSystemWebcam" type="button" title="Use built-in webcam (device://0)">Use webcam</button>
           <button id="addCamera" type="submit" class="primary">Add</button>
         </form>
         <div class="run-actions">
           <button id="showTargetQr" type="button">Target QR</button>
+          <button id="exportAll" type="button" title="Save calibration.json / report.md / detections.csv for every camera">Export</button>
           <button id="toggleStreams" type="button" class="primary">Start All</button>
         </div>
       </section>

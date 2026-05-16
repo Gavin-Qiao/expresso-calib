@@ -299,6 +299,20 @@ class CameraPipeline:
         if parsed.scheme in {"http", "https"}:
             return MjpegCapture(self.url)
 
+        if parsed.scheme == "device":
+            # Local webcam via OpenCV's platform-native backend. Index parsed
+            # out of device://N. No FFmpeg params (they only apply to network
+            # streams).
+            index_str = (parsed.netloc or parsed.path.lstrip("/") or "0").strip()
+            try:
+                index = int(index_str)
+            except ValueError:
+                index = 0
+            capture = cv2.VideoCapture(index)
+            if capture is not None and capture.isOpened() and hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            return capture
+
         params: list[int] = []
         if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
             params.extend([cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000])

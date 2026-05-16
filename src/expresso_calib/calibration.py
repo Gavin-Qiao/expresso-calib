@@ -387,25 +387,38 @@ class CalibrationAccumulator:
         except (cv2.error, ValueError, RuntimeError) as exc:
             return SolveNumericalFailure(reason=str(exc))
 
-        quality = self.summarize_quality(selected, calibration, usable_frames=len(solve_pool))
-        quality.update(solve_pool_stats)
-        quality["initialRmsReprojectionErrorPx"] = initial_calibration.rms_reprojection_error_px
-        outlier_rejection: dict[str, Any] = {"rejectedFrames": len(rejected)}
-        if rejected:
-            outlier_rejection["thresholdPx"] = outlier_threshold
-            outlier_rejection["initialSelectedFrames"] = len(selected) + len(rejected)
-        quality["outlierRejection"] = outlier_rejection
-        if rejected:
-            quality["warnings"].append(
-                f"Excluded {len(rejected)} high-error selected frame"
-                f"{'' if len(rejected) == 1 else 's'} before final solve."
-            )
-            rejection_rate = len(rejected) / max(1, len(selected) + len(rejected))
-            if (
-                quality.get("verdict") == "GOOD"
-                and rejection_rate > self.refinement_marginal_rejection_rate
-            ):
-                quality["verdict"] = "MARGINAL"
+        # Fallback safety net: a bug in summarize_quality / pose diversity /
+        # convergence computation must NOT take down the worker. The K-matrix
+        # solve already succeeded; emit it with a minimal quality dict so the
+        # operator can still see RMS + export the calibration.
+        try:
+            quality = self.summarize_quality(selected, calibration, usable_frames=len(solve_pool))
+            quality.update(solve_pool_stats)
+            quality["initialRmsReprojectionErrorPx"] = initial_calibration.rms_reprojection_error_px
+            outlier_rejection: dict[str, Any] = {"rejectedFrames": len(rejected)}
+            if rejected:
+                outlier_rejection["thresholdPx"] = outlier_threshold
+                outlier_rejection["initialSelectedFrames"] = len(selected) + len(rejected)
+            quality["outlierRejection"] = outlier_rejection
+            if rejected:
+                quality["warnings"].append(
+                    f"Excluded {len(rejected)} high-error selected frame"
+                    f"{'' if len(rejected) == 1 else 's'} before final solve."
+                )
+                rejection_rate = len(rejected) / max(1, len(selected) + len(rejected))
+                if (
+                    quality.get("verdict") == "GOOD"
+                    and rejection_rate > self.refinement_marginal_rejection_rate
+                ):
+                    quality["verdict"] = "MARGINAL"
+        except Exception as exc:
+            quality = {
+                "verdict": "UNKNOWN",
+                "redFlags": [f"Quality computation failed: {exc}"],
+                "warnings": [],
+                "guidance": "Quality summary unavailable; calibration values are still valid.",
+                "selectedFrames": len(selected),
+            }
         return SolveOk(
             solve=CalibrationSolveResult(
                 calibration=calibration,

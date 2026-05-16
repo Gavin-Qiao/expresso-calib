@@ -10,6 +10,8 @@ const elements = {
   targetQrImage: document.getElementById("targetQrImage"),
   targetQrUrl: document.getElementById("targetQrUrl"),
   toggleStreams: document.getElementById("toggleStreams"),
+  exportAll: document.getElementById("exportAll"),
+  useSystemWebcam: document.getElementById("useSystemWebcam"),
   list: document.getElementById("cameraList"),
   grid: document.getElementById("cameraGrid"),
   rowTemplate: document.getElementById("cameraRowTemplate"),
@@ -40,6 +42,14 @@ async function init() {
   elements.closeTargetQr.addEventListener("click", closeTargetQr);
   elements.targetQrDialog.addEventListener("click", closeTargetQrOnBackdrop);
   elements.toggleStreams.addEventListener("click", toggleStreams);
+  elements.exportAll.addEventListener("click", exportAllCameras);
+  elements.useSystemWebcam.addEventListener("click", () => {
+    elements.url.value = "device://0";
+    if (!elements.label.value.trim()) {
+      elements.label.value = "Webcam";
+    }
+    elements.url.focus();
+  });
 
   await refreshCameras();
   connectMetrics();
@@ -89,6 +99,43 @@ async function toggleStreams() {
     await refreshCameras();
   } finally {
     elements.toggleStreams.disabled = false;
+  }
+}
+
+async function exportAllCameras() {
+  elements.exportAll.disabled = true;
+  const original = elements.exportAll.textContent;
+  elements.exportAll.textContent = "Exporting…";
+  try {
+    const response = await fetch("/api/cameras/export-all", { method: "POST" });
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (e) {}
+    if (!response.ok || !payload?.ok) {
+      elements.exportAll.textContent = "Export failed";
+      return;
+    }
+    const results = payload.results || [];
+    const writes = results.filter((r) => r.ok);
+    const skips = results.filter((r) => !r.ok);
+    let summary = `Wrote ${writes.length}`;
+    if (writes.length === 1) {
+      summary += `: ${writes[0].runDir}`;
+    } else if (writes.length > 1) {
+      summary += " run dirs";
+    }
+    if (skips.length > 0) {
+      summary += ` · skipped ${skips.length} (no solve yet)`;
+    }
+    elements.exportAll.textContent = summary;
+  } catch (err) {
+    elements.exportAll.textContent = `Export error: ${err?.message || err}`;
+  } finally {
+    setTimeout(() => {
+      elements.exportAll.textContent = original;
+      elements.exportAll.disabled = false;
+    }, 4000);
   }
 }
 

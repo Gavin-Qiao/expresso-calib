@@ -677,6 +677,45 @@ def create_app() -> FastAPI:
         await request.app.state.live.stop_all()
         return JSONResponse({"ok": True, "metrics": request.app.state.live.metrics()})
 
+    @app.post("/api/cameras/export-all")
+    async def export_all_cameras(request: Request) -> JSONResponse:
+        # Fallback path: writes calibration.json / detections.csv / report.md /
+        # debug images for every camera that has solved at least once.
+        # Operator clicks this when they want artifacts on disk regardless of
+        # what the convergence detector reports.
+        live = request.app.state.live
+        results: list[dict[str, Any]] = []
+        for camera_id, camera in list(live.cameras.items()):
+            accumulator = camera.accumulator
+            if accumulator.last_calibration is None:
+                results.append({"cameraId": camera_id, "ok": False, "detail": "no solve yet"})
+                continue
+            try:
+                run_dir = await asyncio.to_thread(accumulator.export)
+                results.append({"cameraId": camera_id, "ok": True, "runDir": str(run_dir)})
+            except Exception as exc:
+                results.append(
+                    {"cameraId": camera_id, "ok": False, "detail": f"export failed: {exc}"}
+                )
+        return JSONResponse({"ok": True, "results": results})
+
+    @app.post("/api/cameras/{camera_id}/export")
+    async def export_camera(camera_id: str, request: Request) -> JSONResponse:
+        live = request.app.state.live
+        camera = live.cameras.get(camera_id)
+        if camera is None:
+            return JSONResponse({"ok": False, "detail": "Camera not found"}, status_code=404)
+        if camera.accumulator.last_calibration is None:
+            return JSONResponse(
+                {"ok": False, "detail": "Camera has not solved yet; capture more frames first."},
+                status_code=409,
+            )
+        try:
+            run_dir = await asyncio.to_thread(camera.accumulator.export)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "detail": f"Export failed: {exc}"}, status_code=500)
+        return JSONResponse({"ok": True, "runDir": str(run_dir)})
+
     @app.get("/api/cameras/{camera_id}/latest.jpg")
     async def camera_latest(camera_id: str, request: Request) -> Response:
         camera = request.app.state.live.cameras.get(camera_id)
@@ -753,8 +792,16 @@ def target_url_for_request(request: Request) -> str:
 def _clean_camera_url(url: str) -> str:
     clean = url.strip()
     parsed = urlparse(clean)
+    if parsed.scheme == "device":
+        # device://N opens the Nth local webcam via cv2.VideoCapture. Useful on
+        # Windows/Linux where there is no MacBook camera bridge — operator can
+        # use the built-in webcam without spinning up an external MJPEG server.
+        index_str = (parsed.netloc or parsed.path.lstrip("/") or "").strip()
+        if not index_str.isdigit():
+            raise ValueError("device:// URLs must be of the form device://0, device://1, ...")
+        return f"device://{int(index_str)}"
     if parsed.scheme not in {"http", "https", "rtsp"} or not parsed.netloc:
-        raise ValueError("Camera URL must be an absolute http, https, or rtsp URL.")
+        raise ValueError("Camera URL must be an absolute http, https, rtsp URL, or device://N.")
     return clean
 
 

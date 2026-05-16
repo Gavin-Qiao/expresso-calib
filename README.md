@@ -84,6 +84,14 @@ Open:
 http://127.0.0.1:3987/operator
 ```
 
+## Local Webcam (Windows / Linux / Mac fallback)
+
+For systems without the MacBook bridge, use the operator console's **Use
+webcam** button (or type `device://0`, `device://1`, ... into the URL field).
+The server opens the local webcam directly via OpenCV's platform backend
+(DirectShow on Windows, V4L2 on Linux, AVFoundation on Mac). Index `0` is the
+default camera.
+
 ## MacBook Camera Source
 
 Launch the helper app:
@@ -193,7 +201,7 @@ Focus behavior:
 Camera URLs, calibration accumulators, and solve history are ephemeral. They live
 only for the current server process.
 
-The app permanently saves only accepted ChaRuCo screenshots:
+The app permanently saves accepted ChaRuCo screenshots automatically:
 
 ```text
 runs/YYYYMMDD_HHMMSS/screenshots/<camera-label>/frame_000123.jpg
@@ -203,13 +211,20 @@ Screenshots are written only when a frame is accepted into that camera’s
 calibration candidate set. They include the detected ChaRuCo corners drawn on
 the image for auditability.
 
-The live solve no longer writes these files automatically:
+The live solve does NOT auto-write these files:
 
 ```text
 calibration.json
 report.md
 detections.csv
 ```
+
+Click **Export** in the operator console (top bar) to write them for every
+camera that has solved at least once. This is the manual fallback if the
+convergence detector misbehaves or if you simply want to capture the current
+state. It also writes ~20 debug images per camera under `runs/.../debug/`. The
+endpoint is `POST /api/cameras/export-all` (or `POST /api/cameras/{id}/export`
+for a single camera).
 
 ## API Surface
 
