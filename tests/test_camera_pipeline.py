@@ -208,3 +208,49 @@ async def test_lifespan_stops_all_cameras_on_shutdown() -> None:
         app.state.live.cameras["cam-1"] = TrackingCamera()  # type: ignore[assignment]
 
     assert stopped.is_set()
+
+
+def test_oversized_post_body_is_rejected() -> None:
+    from fastapi.testclient import TestClient
+    from expresso_calib.server import create_app, MAX_REQUEST_BODY_BYTES
+
+    app = create_app()
+    with TestClient(app) as client:
+        oversized = b"x" * (MAX_REQUEST_BODY_BYTES + 1)
+        response = client.post(
+            "/api/cameras",
+            content=oversized,
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 413
+
+
+def test_mjpeg_oversized_content_length_is_dropped() -> None:
+    from expresso_calib.server import MjpegCapture, MJPEG_MAX_FRAME_BYTES
+
+    capture = MjpegCapture.__new__(MjpegCapture)
+    capture.url = "fake"
+    capture.buffer = bytearray()
+    capture.opened = True
+    capture.boundary = b"--frame"
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.lines = iter([
+                b"--frame\r\n",
+                f"content-length: {MJPEG_MAX_FRAME_BYTES + 1}\r\n".encode(),
+                b"\r\n",
+            ])
+
+        def readline(self) -> bytes:
+            return next(self.lines, b"")
+
+        def read(self, n: int) -> bytes:
+            raise AssertionError(
+                f"read({n}) called for oversized declared content-length"
+            )
+
+    capture.response = FakeResponse()
+    ok, _ = capture._read_multipart_frame()
+    assert ok is False
+    assert capture.opened is False

@@ -46,6 +46,8 @@ CAPTURE_RECONNECT_DELAY_SEC = 3.0
 FRAME_STALE_SEC = 3.0
 MJPEG_READ_CHUNK_BYTES = 4096
 MJPEG_MAX_BUFFER_BYTES = 8 * 1024 * 1024
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+MJPEG_MAX_FRAME_BYTES = 8 * 1024 * 1024
 DEFAULT_CAMERA_URL = "http://127.0.0.1:3988/stream.mjpg"
 
 
@@ -234,6 +236,9 @@ class MjpegCapture:
             content_length = _safe_int(headers.get("content-length"))
             if content_length is None or content_length <= 0:
                 self.boundary = None
+                return False, None
+            if content_length > MJPEG_MAX_FRAME_BYTES:
+                self.opened = False
                 return False, None
 
             jpeg = self.response.read(content_length)
@@ -964,6 +969,22 @@ def create_app() -> FastAPI:
             await app.state.live.stop_all()
 
     app = FastAPI(title="Expresso Calib", version="0.1.0", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def cap_body_size(request: Request, call_next):
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > MAX_REQUEST_BODY_BYTES:
+                    return JSONResponse(
+                        {"detail": "Request body too large."}, status_code=413
+                    )
+            except ValueError:
+                return JSONResponse(
+                    {"detail": "Invalid Content-Length."}, status_code=400
+                )
+        return await call_next(request)
+
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
     @app.get("/", include_in_schema=False)
