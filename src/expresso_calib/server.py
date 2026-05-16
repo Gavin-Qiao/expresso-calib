@@ -755,6 +755,7 @@ class ManagedCamera:
             "acceptedSinceSolve": self.accumulator.accepted_since_solve,
             "duplicatePoseFrames": self.accumulator.duplicate_pose_rejections,
             "duplicateImageFrames": self.accumulator.duplicate_image_rejections,
+            "rejectedFrames": sum(1 for item in self.accumulator.candidates if item.rejected),
             "quality": self.accumulator.last_quality,
             "solveHistory": self.accumulator.solve_history[-6:],
             "solveDue": self.accumulator.should_solve(),

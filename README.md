@@ -286,9 +286,10 @@ xcrun swiftc -O \
 ```text
 src/expresso_calib/
   board.py          ChaRuCo board generation and target rendering
-  calibration.py    frame scoring, accumulation, solving, screenshots
+  calibration.py    frame scoring, accumulation, solving
   detection.py      OpenCV ArUco/ChaRuCo detection
   multi_camera.py   camera registry and focus arbitration helpers
+  reports.py        calibration.json / detections.csv / report.md writers
   server.py         FastAPI app and multi-camera stream runtime
   web/              operator and iPad target pages
 
