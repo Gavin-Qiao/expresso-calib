@@ -1053,3 +1053,155 @@ def test_select_diverse_prefers_truly_diverse_over_high_quality_near_duplicate(
         "high-quality near-duplicate; "
         f"chosen frame indices: {sorted(chosen_ids)}"
     )
+
+
+def test_pose_diversity_buckets_angles_and_scales(tmp_path) -> None:
+    from expresso_calib.calibration import CandidateFrame, compute_pose_diversity
+
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    candidates = []
+    for i, (angle, area) in enumerate(
+        [
+            (0.0, 0.02),  # far, angle bucket 0
+            (45.0, 0.08),  # mid, angle bucket 3
+            (90.0, 0.20),  # near, angle bucket 6
+            (135.0, 0.20),  # near, angle bucket 9
+        ]
+    ):
+        det = fake_detection(frame_index=i + 1, center_x=0.5, center_y=0.5, area_fraction=area)
+        det.angle_deg = angle
+        candidates.append(
+            CandidateFrame(detection=det, image_bgr=image.copy(), accepted_at=f"2026-01-01T{i:02d}")
+        )
+
+    diversity = compute_pose_diversity(candidates)
+    assert diversity["angleBucketsCovered"] == 4
+    assert diversity["scaleBucketsCovered"] == 3
+    assert diversity["missingScale"] == []
+
+    only_near = [candidates[2], candidates[3]]
+    diversity_near = compute_pose_diversity(only_near)
+    assert "far" in diversity_near["missingScale"]
+    assert "mid" in diversity_near["missingScale"]
+
+
+def test_convergence_states_progress_through_lifecycle(tmp_path) -> None:
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+
+    # No solves yet -> not_solved
+    conv = accumulator.compute_convergence(verdict=None)
+    assert conv["state"] == "not_solved"
+    assert conv["kStabilityPct"] is None
+    assert conv["rmsTrend"] is None
+
+    # Inject drifting K + improving RMS -> collecting
+    accumulator.k_history = [
+        [[1000.0, 0, 480.0], [0, 1000.0, 270.0], [0, 0, 1]],
+        [[1100.0, 0, 480.0], [0, 1100.0, 270.0], [0, 0, 1]],
+        [[1200.0, 0, 480.0], [0, 1200.0, 270.0], [0, 0, 1]],
+    ]
+    accumulator.solve_history = [
+        {"rmsReprojectionErrorPx": 1.20},
+        {"rmsReprojectionErrorPx": 0.90},
+        {"rmsReprojectionErrorPx": 0.80},
+    ]
+    conv = accumulator.compute_convergence(verdict="MARGINAL")
+    assert conv["state"] == "collecting", f"K drifting ~10% should be 'collecting', got {conv}"
+
+    # Stable K, improving RMS -> improving
+    accumulator.k_history = [
+        [[1500.0, 0, 480.0], [0, 1500.0, 270.0], [0, 0, 1]],
+        [[1500.5, 0, 480.0], [0, 1500.5, 270.0], [0, 0, 1]],
+        [[1500.2, 0, 480.0], [0, 1500.2, 270.0], [0, 0, 1]],
+    ]
+    accumulator.solve_history = [
+        {"rmsReprojectionErrorPx": 1.50},
+        {"rmsReprojectionErrorPx": 1.00},
+        {"rmsReprojectionErrorPx": 0.70},
+    ]
+    conv = accumulator.compute_convergence(verdict="MARGINAL")
+    assert conv["state"] == "improving", (
+        f"stable K + improving RMS should be 'improving', got {conv}"
+    )
+
+    # Stable K, plateau RMS, verdict GOOD -> converged
+    accumulator.solve_history = [
+        {"rmsReprojectionErrorPx": 0.50},
+        {"rmsReprojectionErrorPx": 0.51},
+        {"rmsReprojectionErrorPx": 0.50},
+    ]
+    conv = accumulator.compute_convergence(verdict="GOOD")
+    assert conv["state"] == "converged", (
+        f"stable + plateau + GOOD should be 'converged', got {conv}"
+    )
+
+    # Stable K, plateau RMS, verdict MARGINAL -> plateau
+    conv = accumulator.compute_convergence(verdict="MARGINAL")
+    assert conv["state"] == "plateau", (
+        f"stable + plateau + MARGINAL should be 'plateau', got {conv}"
+    )
+
+    # Worsening RMS -> diverging
+    accumulator.solve_history = [
+        {"rmsReprojectionErrorPx": 0.50},
+        {"rmsReprojectionErrorPx": 0.65},
+        {"rmsReprojectionErrorPx": 0.85},
+    ]
+    conv = accumulator.compute_convergence(verdict="MARGINAL")
+    assert conv["state"] == "diverging", f"worsening RMS should be 'diverging', got {conv}"
+
+
+def test_least_occupied_quadrant_picks_emptiest_quadrant(tmp_path) -> None:
+    from expresso_calib.calibration import least_occupied_quadrant
+
+    # 4 in upper-left, 2 in upper-right, 2 in lower-left, 0 in lower-right.
+    # Default 8x6 grid -> mid_x=4, mid_y=3.
+    occupied = {
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (1, 1),  # upper-left
+        (5, 0),
+        (6, 1),  # upper-right
+        (1, 4),
+        (2, 5),  # lower-left
+    }
+    weakest = least_occupied_quadrant(occupied)
+    assert weakest is not None
+    assert weakest[0] == "lower-right", (
+        f"lower-right quadrant is empty; should be picked as weakest, got {weakest}"
+    )
+
+
+def test_guidance_uses_pose_and_quadrant_signals(tmp_path) -> None:
+    from expresso_calib.calibration import CandidateFrame
+
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    accumulator = CalibrationAccumulator(DEFAULT_BOARD, tmp_path, create_run_dir=False)
+
+    # Build 20 frames all at mid distance — no near, no far. Should trigger
+    # the "show closer" guidance (near is checked first).
+    selected = []
+    for i in range(20):
+        cx = 0.15 + (i % 5) * 0.18
+        cy = 0.20 + (i // 5) * 0.20
+        det = fake_detection(frame_index=i + 1, center_x=cx, center_y=cy, area_fraction=0.08)
+        det.charuco_count = 30
+        selected.append(
+            CandidateFrame(detection=det, image_bgr=image.copy(), accepted_at=f"2026-01-01T{i:02d}")
+        )
+
+    cal = CalibrationResult(
+        rms_reprojection_error_px=0.7,
+        camera_matrix=np.eye(3, dtype=float),
+        distortion_coefficients=np.zeros(5, dtype=float),
+        per_view_errors_px=[0.5 for _ in selected],
+        selected_count=len(selected),
+        flags=0,
+    )
+    quality = accumulator.summarize_quality(selected, cal)
+    assert quality["guidance"], "guidance string must be populated"
+    assert "closer" in quality["guidance"].lower(), (
+        f"missing 'near' bucket should produce 'show closer' guidance, got {quality['guidance']}"
+    )
+    assert "near" in quality["poseDiversity"]["missingScale"]

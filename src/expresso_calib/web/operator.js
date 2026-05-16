@@ -289,6 +289,11 @@ function updateTile(tile, camera, focusedCameraId) {
   tile.classList.toggle("accuracy-marginal", grade === "marginal");
   tile.classList.toggle("accuracy-poor", grade === "poor");
   tile.classList.toggle("accuracy-pending", grade === "pending");
+  const convergenceState =
+    (camera.quality && camera.quality.convergence && camera.quality.convergence.state) || null;
+  tile.dataset.convergence = convergenceState || "";
+  tile.classList.toggle("is-converged", convergenceState === "converged");
+  tile.classList.toggle("is-diverging", convergenceState === "diverging");
 }
 
 function accuracyScore(rms, thresholds) {
@@ -339,6 +344,17 @@ function cameraLogText(camera, charucoCount, markerCount, minCorners) {
   }
   if (camera.pipeline && camera.pipeline.solverRunning) {
     return "solving calibration";
+  }
+  const convergence = camera.quality && camera.quality.convergence;
+  const guidance = camera.quality && camera.quality.guidance;
+  if (convergence && convergence.state === "converged") {
+    return "converged — you can stop and export";
+  }
+  if (convergence && convergence.state === "diverging") {
+    return "diverging — RMS trending up";
+  }
+  if (guidance) {
+    return guidance;
   }
   if (camera.solveDue) {
     return `solve queued: ${Number(camera.acceptedSinceSolve || 0)} new`;

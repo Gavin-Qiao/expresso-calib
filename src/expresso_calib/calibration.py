@@ -100,17 +100,31 @@ COVERAGE_OCCUPANCY_REDO_BELOW = 0.30
 COVERAGE_OCCUPANCY_MARGINAL_BELOW = 0.50
 MAX_REFINEMENT_PASSES = 3
 
+# Pose-diversity buckets. Calibration accuracy benefits from a wide spread of
+# board orientations AND a wide spread of distances; we report bucket
+# occupancy so the operator can see which combinations they haven't shown yet.
+POSE_ANGLE_BUCKETS = 12  # 15-degree slices over [0, 180)
+POSE_SCALE_BUCKET_LABELS = ("far", "mid", "near")
+POSE_SCALE_BUCKET_EDGES = (0.04, 0.14)  # area_fraction boundaries: far<0.04<=mid<0.14<=near
 
-def compute_cell_occupancy(
+# Convergence detector. "Converged" means K is stable AND RMS has plateaued
+# AND the verdict is GOOD — i.e., the operator can stop. Other states tell
+# them what's still wrong.
+K_STABILITY_CONVERGED_PCT = 0.5  # < 0.5% relative span across last 5 solves' fx/fy/cx/cy
+RMS_PLATEAU_RELATIVE_SPREAD = 0.05  # last-5 RMS spread within 5% of median = plateau
+RMS_TREND_LOOKBACK = 5
+
+
+def compute_cell_occupancy_grid(
     selected: list[CandidateFrame],
     image_width: int,
     image_height: int,
     cells_x: int = COVERAGE_CELLS_X,
     cells_y: int = COVERAGE_CELLS_Y,
-) -> float:
-    if not selected or image_width <= 0 or image_height <= 0:
-        return 0.0
+) -> set[tuple[int, int]]:
     occupied: set[tuple[int, int]] = set()
+    if not selected or image_width <= 0 or image_height <= 0:
+        return occupied
     for item in selected:
         corners = item.detection.corners
         if corners is None:
@@ -120,6 +134,67 @@ def compute_cell_occupancy(
         cell_y = np.clip((pts[:, 1] / image_height * cells_y).astype(int), 0, cells_y - 1)
         for cx, cy in zip(cell_x.tolist(), cell_y.tolist(), strict=False):
             occupied.add((int(cx), int(cy)))
+    return occupied
+
+
+def compute_pose_diversity(
+    candidates: list[CandidateFrame],
+    *,
+    angle_buckets: int = POSE_ANGLE_BUCKETS,
+    scale_edges: tuple[float, float] = POSE_SCALE_BUCKET_EDGES,
+    scale_labels: tuple[str, str, str] = POSE_SCALE_BUCKET_LABELS,
+) -> dict[str, Any]:
+    angle_seen: set[int] = set()
+    scale_seen: set[str] = set()
+    for item in candidates:
+        det = item.detection
+        bucket = int((det.angle_deg % 180.0) / 180.0 * angle_buckets)
+        angle_seen.add(min(bucket, angle_buckets - 1))
+        if det.area_fraction < scale_edges[0]:
+            scale_seen.add(scale_labels[0])
+        elif det.area_fraction < scale_edges[1]:
+            scale_seen.add(scale_labels[1])
+        else:
+            scale_seen.add(scale_labels[2])
+    return {
+        "angleBuckets": angle_buckets,
+        "angleBucketsCovered": len(angle_seen),
+        "scaleBuckets": len(scale_labels),
+        "scaleBucketsCovered": len(scale_seen),
+        "missingScale": [label for label in scale_labels if label not in scale_seen],
+    }
+
+
+def least_occupied_quadrant(
+    occupied_cells: set[tuple[int, int]],
+    cells_x: int = COVERAGE_CELLS_X,
+    cells_y: int = COVERAGE_CELLS_Y,
+) -> tuple[str, int] | None:
+    if not occupied_cells:
+        return None
+    mid_x = cells_x // 2
+    mid_y = cells_y // 2
+    quads: dict[str, int] = {
+        "upper-left": 0,
+        "upper-right": 0,
+        "lower-left": 0,
+        "lower-right": 0,
+    }
+    for cx, cy in occupied_cells:
+        key = ("upper" if cy < mid_y else "lower") + "-" + ("left" if cx < mid_x else "right")
+        quads[key] += 1
+    name = min(quads, key=lambda k: quads[k])
+    return name, quads[name]
+
+
+def compute_cell_occupancy(
+    selected: list[CandidateFrame],
+    image_width: int,
+    image_height: int,
+    cells_x: int = COVERAGE_CELLS_X,
+    cells_y: int = COVERAGE_CELLS_Y,
+) -> float:
+    occupied = compute_cell_occupancy_grid(selected, image_width, image_height, cells_x, cells_y)
     return len(occupied) / (cells_x * cells_y)
 
 
@@ -712,7 +787,10 @@ class CalibrationAccumulator:
         )
         coverage_width = float((all_points[:, 0].max() - all_points[:, 0].min()) / width)
         coverage_height = float((all_points[:, 1].max() - all_points[:, 1].min()) / height)
-        cell_occupancy = compute_cell_occupancy(selected, width, height)
+        occupied_cells = compute_cell_occupancy_grid(selected, width, height)
+        cell_occupancy = len(occupied_cells) / (COVERAGE_CELLS_X * COVERAGE_CELLS_Y)
+        pose_diversity = compute_pose_diversity(selected)
+        weakest_quadrant = least_occupied_quadrant(occupied_cells)
         edge_margin = {
             "left": float(all_points[:, 0].min() / width),
             "right": float((width - all_points[:, 0].max()) / width),
@@ -765,10 +843,22 @@ class CalibrationAccumulator:
         elif yellow:
             verdict = "MARGINAL"
 
+        convergence = self.compute_convergence(verdict=verdict)
+        guidance = self._live_guidance(
+            verdict=verdict,
+            convergence=convergence,
+            pose_diversity=pose_diversity,
+            cell_occupancy=cell_occupancy,
+            weakest_quadrant=weakest_quadrant,
+        )
+
         return {
             "verdict": verdict,
             "redFlags": red,
             "warnings": yellow,
+            "guidance": guidance,
+            "convergence": convergence,
+            "poseDiversity": pose_diversity,
             "selectedFrames": len(selected),
             "usableFrames": len(self.candidates) if usable_frames is None else usable_frames,
             "cornerCount": {
@@ -786,6 +876,7 @@ class CalibrationAccumulator:
                 "heightFraction": coverage_height,
                 "cellOccupancyFraction": cell_occupancy,
                 "cellGrid": [COVERAGE_CELLS_X, COVERAGE_CELLS_Y],
+                "weakestQuadrant": weakest_quadrant[0] if weakest_quadrant else None,
                 "edgeMarginFraction": edge_margin,
             },
             "boardAreaFraction": {
@@ -794,6 +885,43 @@ class CalibrationAccumulator:
                 "max": max(areas) if areas else 0.0,
             },
         }
+
+    def _live_guidance(
+        self,
+        *,
+        verdict: str,
+        convergence: dict[str, Any],
+        pose_diversity: dict[str, Any],
+        cell_occupancy: float,
+        weakest_quadrant: tuple[str, int] | None,
+    ) -> str:
+        # Ordered by what the operator should care about MOST right now.
+        # Converged means stop; diverging means worry; otherwise prefer the
+        # most-specific actionable gap (missing distance band > missing
+        # quadrant > generic "keep going").
+        state = convergence["state"]
+        if state == "converged":
+            return "Calibration has converged. You can stop and export."
+        if state == "diverging":
+            return "Reprojection error is trending up — hold steady or reset and start over."
+        missing_scale = pose_diversity.get("missingScale") or []
+        if "near" in missing_scale:
+            return "Show the board closer to the camera."
+        if "far" in missing_scale:
+            return "Show the board farther from the camera."
+        if cell_occupancy < COVERAGE_OCCUPANCY_MARGINAL_BELOW and weakest_quadrant:
+            return f"Move the board toward the {weakest_quadrant[0]} quadrant."
+        angle_buckets = pose_diversity.get("angleBuckets") or 1
+        angle_covered = pose_diversity.get("angleBucketsCovered") or 0
+        if angle_covered < angle_buckets * 0.5:
+            return "Add more tilted orientations — rotate the board as you move it."
+        if state == "improving":
+            return "Camera matrix stable; refining error. Keep adding diverse frames."
+        if state == "collecting":
+            return "Camera matrix still drifting; keep moving the board to new poses."
+        if verdict == "MARGINAL":
+            return "Numbers stable; address the warnings to reach GOOD."
+        return "Keep capturing varied poses through edges, corners, near, far, and tilted views."
 
     def guidance(self) -> str:
         detection = self.last_detection
@@ -883,6 +1011,70 @@ class CalibrationAccumulator:
         means = np.maximum(np.abs(terms.mean(axis=1)), 1e-9)
         rel_span = (terms.max(axis=1) - terms.min(axis=1)) / means
         return float(np.max(rel_span) * 100.0)
+
+    def _rms_trend(self) -> str | None:
+        if len(self.solve_history) < 3:
+            return None
+        rms_values = [s["rmsReprojectionErrorPx"] for s in self.solve_history[-RMS_TREND_LOOKBACK:]]
+        if len(rms_values) < 3:
+            return None
+        median = statistics.median(rms_values)
+        if median <= 0:
+            return None
+        spread = (max(rms_values) - min(rms_values)) / median
+        if spread < RMS_PLATEAU_RELATIVE_SPREAD:
+            return "plateau"
+        half = len(rms_values) // 2
+        first = sum(rms_values[:half]) / half
+        last = sum(rms_values[half:]) / (len(rms_values) - half)
+        if last < first * 0.97:
+            return "improving"
+        if last > first * 1.03:
+            return "worsening"
+        return "plateau"
+
+    def compute_convergence(self, *, verdict: str | None = None) -> dict[str, Any]:
+        # The operator needs to know: keep going, or stop?
+        #   - not_solved   : haven't solved yet
+        #   - collecting   : K matrix still drifting; need more diverse poses
+        #   - improving    : K stable, RMS still trending down — a few more frames will help
+        #   - plateau      : K stable AND RMS flat, but verdict is not GOOD — fix what's flagged
+        #   - converged    : K stable AND RMS flat AND verdict GOOD — you can stop
+        #   - diverging    : RMS trending UP — recent frames may be noisy
+        if not self.solve_history:
+            return {
+                "state": "not_solved",
+                "kStabilityPct": None,
+                "rmsTrend": None,
+                "recommendation": "Capture more frames; the first solve runs once enough are collected.",
+            }
+        k_stability = self._k_stability_pct()
+        rms_trend = self._rms_trend()
+        k_stable = k_stability is not None and k_stability < K_STABILITY_CONVERGED_PCT
+        if rms_trend == "worsening":
+            state = "diverging"
+        elif k_stable and rms_trend == "plateau" and verdict == "GOOD":
+            state = "converged"
+        elif k_stable and rms_trend == "plateau":
+            state = "plateau"
+        elif k_stable:
+            state = "improving"
+        else:
+            state = "collecting"
+        recommendations = {
+            "not_solved": "Capture more frames; the first solve runs once enough are collected.",
+            "collecting": "Camera matrix still drifting; keep adding diverse poses.",
+            "improving": "Camera matrix is stable; refining residual error. A few more frames will help.",
+            "plateau": "Numbers are stable but verdict is not yet GOOD. Address red flags and warnings.",
+            "converged": "Calibration has converged. You can stop and export.",
+            "diverging": "Error trending UP. Recent frames may be noisy; hold steady or reset.",
+        }
+        return {
+            "state": state,
+            "kStabilityPct": k_stability,
+            "rmsTrend": rms_trend,
+            "recommendation": recommendations[state],
+        }
 
     def export(self) -> Path:
         from .reports import export_run
