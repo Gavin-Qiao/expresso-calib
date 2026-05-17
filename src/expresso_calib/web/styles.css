@@ -479,15 +479,22 @@ button.danger {
 }
 
 .camera-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   min-width: 0;
   padding: 8px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 7px;
   background: #1b2326;
+}
+
+.camera-row-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
 }
 
 .camera-row-label {
@@ -504,11 +511,67 @@ button.danger {
   white-space: nowrap;
 }
 
-.camera-row-remove {
+.camera-row-remove,
+.camera-row-filters-toggle {
   padding: 6px 9px;
   background: #101618;
   color: #d8e5e7;
   border-color: rgba(255, 255, 255, 0.16);
+}
+
+.camera-row-filters-toggle[aria-expanded="true"] {
+  background: #1b2c2e;
+  border-color: rgba(73, 213, 191, 0.45);
+}
+
+.camera-row-filters {
+  display: grid;
+  gap: 6px;
+  padding: 8px 4px 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.filter-row {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #c9d6d9;
+}
+
+.filter-row input[type="range"] {
+  width: 100%;
+}
+
+.filter-name {
+  color: #8fa0a5;
+}
+
+.filter-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #d8e5e7;
+}
+
+.filter-clahe-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.filter-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.filter-reset {
+  padding: 4px 9px;
+  background: #101618;
+  color: #d8e5e7;
+  border-color: rgba(255, 255, 255, 0.16);
+  font-size: 12px;
 }
 
 .camera-row.is-running {

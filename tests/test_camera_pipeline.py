@@ -331,3 +331,72 @@ def test_export_all_endpoint_reports_skipped_cameras(tmp_path) -> None:
         results = body["results"]
         assert len(results) >= 1
         assert all(r["ok"] is False and "no solve" in r["detail"] for r in results)
+
+
+def test_filters_endpoint_updates_state_and_clamps_out_of_range() -> None:
+    from fastapi.testclient import TestClient
+
+    from expresso_calib.server import create_app
+
+    app = create_app()
+    with TestClient(app) as client:
+        add = client.post(
+            "/api/cameras",
+            json={"label": "filter-cam", "url": "http://example.invalid/stream.mjpg"},
+        )
+        camera_id = add.json()["camera"]["id"]
+
+        # Defaults appear in the snapshot.
+        snap = add.json()["camera"]
+        assert snap["filters"] == {
+            "brightness": 0,
+            "contrast": 100,
+            "gamma": 1.0,
+            "clahe": False,
+        }
+
+        # Out-of-range values are clamped to the allowed window.
+        resp = client.post(
+            f"/api/cameras/{camera_id}/filters",
+            json={"brightness": 9999, "contrast": -100, "gamma": 5.0, "clahe": True},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["filters"]["brightness"] == 100
+        assert body["filters"]["contrast"] == 50
+        assert body["filters"]["gamma"] == 2.5
+        assert body["filters"]["clahe"] is True
+
+        # Subsequent /api/status reflects the clamped values.
+        status = client.get("/api/status").json()
+        camera = next(c for c in status["cameras"] if c["id"] == camera_id)
+        assert camera["filters"] == body["filters"]
+
+
+def test_filters_endpoint_404_for_unknown_camera() -> None:
+    from fastapi.testclient import TestClient
+
+    from expresso_calib.server import create_app
+
+    app = create_app()
+    with TestClient(app) as client:
+        resp = client.post("/api/cameras/missing/filters", json={"brightness": 10})
+        assert resp.status_code == 404
+
+
+def test_filters_endpoint_400_on_invalid_payload() -> None:
+    from fastapi.testclient import TestClient
+
+    from expresso_calib.server import create_app
+
+    app = create_app()
+    with TestClient(app) as client:
+        add = client.post(
+            "/api/cameras",
+            json={"label": "filter-cam", "url": "http://example.invalid/stream.mjpg"},
+        )
+        camera_id = add.json()["camera"]["id"]
+        # Array instead of object.
+        resp = client.post(f"/api/cameras/{camera_id}/filters", json=[1, 2, 3])
+        assert resp.status_code == 400

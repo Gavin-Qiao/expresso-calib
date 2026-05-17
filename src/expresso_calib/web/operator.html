@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Expresso Calib Operator</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260502-solvepool" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260517-filters" />
   </head>
   <body class="operator-body">
     <main class="calib-console">
@@ -40,9 +40,36 @@
 
     <template id="cameraRowTemplate">
       <article class="camera-row">
-        <strong class="camera-row-label"></strong>
-        <span class="camera-row-url"></span>
-        <button type="button" class="camera-row-remove">Remove</button>
+        <div class="camera-row-head">
+          <strong class="camera-row-label"></strong>
+          <span class="camera-row-url"></span>
+          <button type="button" class="camera-row-filters-toggle" aria-expanded="false">Filters</button>
+          <button type="button" class="camera-row-remove">Remove</button>
+        </div>
+        <div class="camera-row-filters" hidden>
+          <label class="filter-row">
+            <span class="filter-name">Brightness</span>
+            <input class="filter-input filter-brightness" type="range" min="-100" max="100" step="1" value="0" />
+            <span class="filter-value filter-brightness-value">0</span>
+          </label>
+          <label class="filter-row">
+            <span class="filter-name">Contrast</span>
+            <input class="filter-input filter-contrast" type="range" min="50" max="200" step="1" value="100" />
+            <span class="filter-value filter-contrast-value">100</span>
+          </label>
+          <label class="filter-row">
+            <span class="filter-name">Gamma</span>
+            <input class="filter-input filter-gamma" type="range" min="0.5" max="2.5" step="0.05" value="1.0" />
+            <span class="filter-value filter-gamma-value">1.00</span>
+          </label>
+          <label class="filter-row filter-clahe-row">
+            <input class="filter-input filter-clahe" type="checkbox" />
+            <span>CLAHE (adaptive contrast)</span>
+          </label>
+          <div class="filter-actions">
+            <button type="button" class="filter-reset">Reset</button>
+          </div>
+        </div>
       </article>
     </template>
 
@@ -70,6 +97,6 @@
       </article>
     </template>
 
-    <script src="/static/operator.js?v=20260502-solvepool"></script>
+    <script src="/static/operator.js?v=20260517-filters"></script>
   </body>
 </html>

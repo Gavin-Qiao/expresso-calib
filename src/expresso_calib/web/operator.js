@@ -24,8 +24,16 @@ const state = {
   focusedCameraId: null,
   targetUrl: "",
   streamsRunning: false,
-  streamSrcById: new Map()
+  streamSrcById: new Map(),
+  filterPostTimers: new Map(),
+  filterUserTouchAt: new Map(),
+  filterRestoredFor: new Set()
 };
+
+const FILTER_DEFAULTS = { brightness: 0, contrast: 100, gamma: 1.0, clahe: false };
+const FILTER_DEBOUNCE_MS = 150;
+const FILTER_TOUCH_GRACE_MS = 1200;
+const FILTER_STORAGE_KEY = "expressoFilters_v1";
 
 init();
 
@@ -219,26 +227,163 @@ function renderCameraList(cameras) {
       row
     ])
   );
+  const seenIds = new Set();
 
   for (const camera of cameras) {
     let row = existing.get(camera.id);
-    if (!row) {
+    const isNew = !row;
+    if (isNew) {
       row = elements.rowTemplate.content.firstElementChild.cloneNode(true);
       row.dataset.cameraId = camera.id;
       row.querySelector(".camera-row-remove").addEventListener("click", () => {
         removeCamera(camera.id);
       });
+      attachFilterHandlers(row, camera.id);
       elements.list.appendChild(row);
     }
     row.querySelector(".camera-row-label").textContent = camera.label;
     row.querySelector(".camera-row-url").textContent = camera.url;
     row.classList.toggle("is-running", Boolean(camera.running));
+    row.dataset.cameraLabel = camera.label || "";
+    syncFilterValues(row, camera);
+    if (isNew) {
+      maybeRestoreFilters(camera);
+    }
+    seenIds.add(camera.id);
     existing.delete(camera.id);
   }
 
-  for (const row of existing.values()) {
+  for (const [id, row] of existing.entries()) {
     row.remove();
+    state.filterPostTimers.delete(id);
+    state.filterUserTouchAt.delete(id);
+    state.filterRestoredFor.delete(id);
   }
+}
+
+function attachFilterHandlers(row, cameraId) {
+  const toggle = row.querySelector(".camera-row-filters-toggle");
+  const panel = row.querySelector(".camera-row-filters");
+  toggle.addEventListener("click", () => {
+    const open = panel.hasAttribute("hidden");
+    if (open) {
+      panel.removeAttribute("hidden");
+      toggle.setAttribute("aria-expanded", "true");
+    } else {
+      panel.setAttribute("hidden", "");
+      toggle.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  const onInput = () => {
+    state.filterUserTouchAt.set(cameraId, Date.now());
+    updateFilterReadouts(row);
+    scheduleFilterPost(cameraId, row);
+  };
+
+  for (const cls of [".filter-brightness", ".filter-contrast", ".filter-gamma"]) {
+    row.querySelector(cls).addEventListener("input", onInput);
+  }
+  row.querySelector(".filter-clahe").addEventListener("change", onInput);
+
+  row.querySelector(".filter-reset").addEventListener("click", () => {
+    setRowFilterValues(row, FILTER_DEFAULTS);
+    state.filterUserTouchAt.set(cameraId, Date.now());
+    scheduleFilterPost(cameraId, row);
+  });
+}
+
+function syncFilterValues(row, camera) {
+  const lastTouched = state.filterUserTouchAt.get(camera.id) || 0;
+  if (Date.now() - lastTouched < FILTER_TOUCH_GRACE_MS) {
+    updateFilterReadouts(row);
+    return;
+  }
+  const filters = camera.filters || FILTER_DEFAULTS;
+  setRowFilterValues(row, filters);
+}
+
+function setRowFilterValues(row, filters) {
+  row.querySelector(".filter-brightness").value = String(filters.brightness ?? 0);
+  row.querySelector(".filter-contrast").value = String(filters.contrast ?? 100);
+  row.querySelector(".filter-gamma").value = String(filters.gamma ?? 1.0);
+  row.querySelector(".filter-clahe").checked = Boolean(filters.clahe);
+  updateFilterReadouts(row);
+}
+
+function updateFilterReadouts(row) {
+  const b = row.querySelector(".filter-brightness").value;
+  const c = row.querySelector(".filter-contrast").value;
+  const g = Number(row.querySelector(".filter-gamma").value);
+  row.querySelector(".filter-brightness-value").textContent = b;
+  row.querySelector(".filter-contrast-value").textContent = c;
+  row.querySelector(".filter-gamma-value").textContent = g.toFixed(2);
+}
+
+function readRowFilters(row) {
+  return {
+    brightness: Number(row.querySelector(".filter-brightness").value) | 0,
+    contrast: Number(row.querySelector(".filter-contrast").value) | 0,
+    gamma: Number(row.querySelector(".filter-gamma").value),
+    clahe: row.querySelector(".filter-clahe").checked
+  };
+}
+
+function scheduleFilterPost(cameraId, row) {
+  const prev = state.filterPostTimers.get(cameraId);
+  if (prev) clearTimeout(prev);
+  const timer = setTimeout(() => {
+    state.filterPostTimers.delete(cameraId);
+    const payload = readRowFilters(row);
+    saveFilterToStorage(row.dataset.cameraLabel || "", payload);
+    fetch(`/api/cameras/${encodeURIComponent(cameraId)}/filters`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).catch(() => {});
+  }, FILTER_DEBOUNCE_MS);
+  state.filterPostTimers.set(cameraId, timer);
+}
+
+function loadAllFiltersFromStorage() {
+  try {
+    return JSON.parse(localStorage.getItem(FILTER_STORAGE_KEY) || "{}") || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveFilterToStorage(label, filters) {
+  if (!label) return;
+  try {
+    const all = loadAllFiltersFromStorage();
+    all[label] = filters;
+    localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(all));
+  } catch (e) {}
+}
+
+function maybeRestoreFilters(camera) {
+  if (state.filterRestoredFor.has(camera.id)) return;
+  state.filterRestoredFor.add(camera.id);
+  const all = loadAllFiltersFromStorage();
+  const saved = all[camera.label || ""];
+  if (!saved) return;
+  const current = camera.filters || FILTER_DEFAULTS;
+  if (filtersEqual(saved, current)) return;
+  fetch(`/api/cameras/${encodeURIComponent(camera.id)}/filters`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(saved)
+  }).catch(() => {});
+}
+
+function filtersEqual(a, b) {
+  return (
+    Number(a.brightness) === Number(b.brightness) &&
+    Number(a.contrast) === Number(b.contrast) &&
+    Math.abs(Number(a.gamma) - Number(b.gamma)) < 1e-6 &&
+    Boolean(a.clahe) === Boolean(b.clahe)
+  );
 }
 
 function renderCameraGrid(cameras, focusedCameraId) {

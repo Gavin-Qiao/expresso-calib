@@ -13,6 +13,8 @@ from urllib.request import urlopen
 import cv2
 import numpy as np
 
+from .filters import FilterPipeline
+
 CAPTURE_OPEN_TIMEOUT_SEC = 8.0
 CAPTURE_READ_TIMEOUT_SEC = 2.0
 CAPTURE_RECONNECT_DELAY_SEC = 3.0
@@ -175,6 +177,7 @@ class CameraPipeline:
         self._frame_listeners: list[FrameListener] = []
         self._broadcast: Callable[[], Awaitable[None]] | None = None
         self._last_broadcast_at = 0.0
+        self.filters = FilterPipeline()
 
     def on_frame(self, listener: FrameListener) -> None:
         self._frame_listeners.append(listener)
@@ -281,10 +284,18 @@ class CameraPipeline:
                     while self.frame_times and now - self.frame_times[0] > 2.0:
                         self.frame_times.popleft()
 
-                    self.latest_frame = frame
+                    if self.filters.settings.is_default():
+                        filtered = frame
+                    else:
+                        try:
+                            filtered = await asyncio.to_thread(self.filters.apply, frame)
+                        except Exception as exc:
+                            self.last_error = f"Filter apply failed: {exc}"
+                            filtered = frame
+                    self.latest_frame = filtered
                     self.latest_frame_seq += 1
 
-                    await self._notify_frame(frame, now, self.frame_index)
+                    await self._notify_frame(filtered, now, self.frame_index)
 
                     await self._maybe_broadcast()
                     await asyncio.sleep(0)

@@ -40,6 +40,7 @@ from .camera_pipeline import (
     CameraPipeline,
     MjpegCapture,
 )
+from .filters import FilterSettings, clamp_settings
 from .multi_camera import FocusTracker, clean_label, slugify_label
 
 __all__ = [
@@ -286,6 +287,9 @@ class ManagedCamera:
         screenshot_dir = session_dir / "screenshots" / slugify_label(self.label, self.id)
         self.worker.reset(accumulator=accumulator, screenshot_dir=screenshot_dir)
 
+    def set_filters(self, settings: FilterSettings) -> None:
+        self.pipeline.filters.update(settings)
+
     # --- view helpers ---
 
     def fps(self) -> float:
@@ -366,6 +370,7 @@ class ManagedCamera:
             "errorGrade": rms_grade(rms, thresholds),
             "errorColor": rms_color(rms, thresholds),
             "rmsThresholds": thresholds,
+            "filters": self.pipeline.filters.settings.to_public_dict(),
             "lastScreenshotPath": self.last_screenshot_path,
             "pipeline": {
                 "captureRunning": _task_running(self.pipeline.capture_task),
@@ -427,6 +432,17 @@ class MultiCameraCalibrationState:
             await camera.stop()
         self.focus = FocusTracker()
         await self.broadcast()
+
+    async def update_camera_filters(
+        self, camera_id: str, payload: Any
+    ) -> dict[str, Any] | None:
+        camera = self.cameras.get(camera_id)
+        if camera is None:
+            return None
+        settings = clamp_settings(payload)
+        camera.set_filters(settings)
+        await self.broadcast()
+        return settings.to_public_dict()
 
     async def update_target_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
         clean = {
@@ -666,6 +682,24 @@ def create_app() -> FastAPI:
     async def remove_camera(camera_id: str, request: Request) -> JSONResponse:
         removed = await request.app.state.live.remove_camera(camera_id)
         return JSONResponse({"ok": removed}, status_code=200 if removed else 404)
+
+    @app.post("/api/cameras/{camera_id}/filters")
+    async def update_camera_filters(camera_id: str, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "error": "invalid JSON"}, status_code=400
+            )
+        try:
+            result = await request.app.state.live.update_camera_filters(camera_id, body)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        if result is None:
+            return JSONResponse(
+                {"ok": False, "error": "camera not found"}, status_code=404
+            )
+        return JSONResponse({"ok": True, "filters": result})
 
     @app.post("/api/cameras/start-all")
     async def start_all(request: Request) -> JSONResponse:
