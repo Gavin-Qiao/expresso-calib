@@ -79,12 +79,6 @@ const IPAD_PRESETS = [
   }
 ];
 
-populateModelSelect();
-loadSavedMetadata();
-renderInstallHint();
-refreshBoardImage();
-refreshPdfLink();
-
 elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
   await saveMetadata();
@@ -99,7 +93,11 @@ elements.widthMm.addEventListener("input", refreshPdfLink);
 elements.heightMm.addEventListener("input", refreshPdfLink);
 
 elements.fullscreen.addEventListener("click", async () => {
-  await saveMetadata();
+  try {
+    await saveMetadata();
+  } catch (err) {
+    console.warn("saveMetadata failed before fullscreen:", err);
+  }
   document.body.classList.add("target-fullscreen");
   lastBoardSizeKey = "";
   refreshBoardImage();
@@ -107,6 +105,22 @@ elements.fullscreen.addEventListener("click", async () => {
 
 window.addEventListener("resize", scheduleBoardRefresh);
 window.addEventListener("orientationchange", () => setTimeout(scheduleBoardRefresh, 250));
+
+try {
+  populateModelSelect();
+  loadSavedMetadata();
+  renderInstallHint();
+  refreshBoardImage();
+  refreshPdfLink();
+} catch (err) {
+  console.error("target.js init failed:", err);
+  if (elements.status) {
+    elements.status.textContent = `Init error: ${err?.message || err}`;
+  }
+  // Image already has default src from HTML; this just ensures we at least
+  // try to refresh it. If refreshBoardImage itself threw, this no-ops safely.
+  try { refreshBoardImage(); } catch (e2) { console.error(e2); }
+}
 
 function populateModelSelect() {
   elements.modelSelect.replaceChildren();
