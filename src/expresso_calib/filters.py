@@ -46,9 +46,7 @@ def clamp_settings(payload: Any) -> FilterSettings:
     if not isinstance(payload, dict):
         raise ValueError("filter payload must be a JSON object")
     return FilterSettings(
-        brightness=_clamp_int(
-            payload.get("brightness", DEFAULT_BRIGHTNESS), *BRIGHTNESS_RANGE
-        ),
+        brightness=_clamp_int(payload.get("brightness", DEFAULT_BRIGHTNESS), *BRIGHTNESS_RANGE),
         contrast=_clamp_int(payload.get("contrast", DEFAULT_CONTRAST), *CONTRAST_RANGE),
         gamma=_clamp_float(payload.get("gamma", DEFAULT_GAMMA), *GAMMA_RANGE),
         clahe=bool(payload.get("clahe", DEFAULT_CLAHE)),

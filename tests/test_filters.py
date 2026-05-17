@@ -85,9 +85,7 @@ def test_apply_handles_none_frame():
 
 
 def test_clamp_settings_clips_out_of_range_values():
-    s = clamp_settings(
-        {"brightness": 9999, "contrast": -50, "gamma": 100.0, "clahe": True}
-    )
+    s = clamp_settings({"brightness": 9999, "contrast": -50, "gamma": 100.0, "clahe": True})
     assert s.brightness == BRIGHTNESS_RANGE[1]
     assert s.contrast == CONTRAST_RANGE[0]
     assert s.gamma == GAMMA_RANGE[1]

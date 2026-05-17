@@ -433,9 +433,7 @@ class MultiCameraCalibrationState:
         self.focus = FocusTracker()
         await self.broadcast()
 
-    async def update_camera_filters(
-        self, camera_id: str, payload: Any
-    ) -> dict[str, Any] | None:
+    async def update_camera_filters(self, camera_id: str, payload: Any) -> dict[str, Any] | None:
         camera = self.cameras.get(camera_id)
         if camera is None:
             return None
@@ -688,17 +686,13 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
-            return JSONResponse(
-                {"ok": False, "error": "invalid JSON"}, status_code=400
-            )
+            return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
         try:
             result = await request.app.state.live.update_camera_filters(camera_id, body)
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         if result is None:
-            return JSONResponse(
-                {"ok": False, "error": "camera not found"}, status_code=404
-            )
+            return JSONResponse({"ok": False, "error": "camera not found"}, status_code=404)
         return JSONResponse({"ok": True, "filters": result})
 
     @app.post("/api/cameras/start-all")
